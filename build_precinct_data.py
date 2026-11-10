@@ -89,6 +89,22 @@ EXPECTED_TYPE = {
 }
 MAX_SHIFT = 1  # the only observed mis-alignment is one column left
 
+# Sheet 72 column letters -> output names.  The merged group label
+# `Against (En Contra)` actually spans G2:J2; column K is labelled `Total` and
+# holds each precinct's grand total (For + Against).  It is kept because the
+# request named G-K, but it is named as a total rather than an Against figure.
+PROP_A_COLS = [
+    ("G", "prop_a_city_against_election_day"),
+    ("H", "prop_a_city_against_ev_in_person"),
+    ("I", "prop_a_city_against_ev_mail"),
+    ("J", "prop_a_city_against_total_votes"),
+    ("K", "prop_a_city_total_votes"),
+]
+PROP_A_ROW_COUNT_COL = "prop_a_city_source_rows"
+PROP_A_CODES_COL = "prop_a_city_precinct_code"
+
+
+
 
 def normalise(header: str) -> str:
     """Canonical column name: lower snake_case so near-duplicate headers union."""
@@ -212,21 +228,6 @@ def load_csv(path: Path):
     with open(path, newline="") as fh:
         reader = csv.DictReader(fh)
         return list(reader), list(reader.fieldnames or [])
-
-
-# Sheet 72 column letters -> output names.  The merged group label
-# `Against (En Contra)` actually spans G2:J2; column K is labelled `Total` and
-# holds each precinct's grand total (For + Against).  It is kept because the
-# request named G-K, but it is named as a total rather than an Against figure.
-PROP_A_COLS = [
-    ("G", "prop_a_city_against_election_day"),
-    ("H", "prop_a_city_against_ev_in_person"),
-    ("I", "prop_a_city_against_ev_mail"),
-    ("J", "prop_a_city_against_total_votes"),
-    ("K", "prop_a_city_total_votes"),
-]
-PROP_A_ROW_COUNT_COL = "prop_a_city_source_rows"
-PROP_A_CODES_COL = "prop_a_city_precinct_code"
 
 
 def as_number(value):
