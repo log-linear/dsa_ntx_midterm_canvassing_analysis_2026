@@ -1,0 +1,90 @@
+field_name,data_type,description,readable_name
+dallas_county_precinct_number,text,"Dallas County precinct number, from the unnamed first column of every sheet in the three district canvassing workbooks. Join key to the VTD mapping and to the first four characters of sheet 72's `Precinct`.",Dallas County Precinct Number
+precinct_group,text,"Name of the .ods sheet the row came from; a precinct group is the set of precincts one district worksheet covers (e.g. 'Casa View', 'Far Westside').",Precinct Group
+district,text,"Dallas City Council district, taken from the source workbook filename (District 1 / District 2 / District 9).",Council District
+sheet_column_alignment,text,Audit flag for the alignment repair. 'aligned' means the row's cells sat under their own headers; 'shifted_left_1_corrected' means the metric values were keyed one column left of their headers in the source and have been shifted right. 22 District 2 rows were corrected.,Source Row Alignment
+2024_prop_r_for,number,"2024 Proposition 14 (Prop R) votes FOR, as recorded by district volunteers in the canvassing workbooks. Blank where the source sheet did not record it (including all rows whose values were column-shifted) (whole numbers in this extract, declared integer upstream).",2024 Prop R (For)
+2024_prop_u_against,number,"2024 Proposition 5 (Prop U) votes AGAINST, as recorded in the canvassing workbooks. Blank where the source sheet did not record it (whole numbers in this extract, declared integer upstream).",2024 Prop U (Against)
+2024_kamala,number,"Share of the 2024 presidential vote cast for Harris/Walz in this precinct, as recorded in the canvassing workbooks (fraction 0-1).",2024 Kamala Vote Share
+2024_turnout,number,Turnout as a share of registered voters in the 2024 general election (fraction 0-1). District 9's 'Apartment City' sheet headed this column '2028 Turnout'; that typo is aliased onto this field (2 row(s) hold the literal placeholder N/A rather than a number).,2024 Turnout Share
+2026_registered,integer,Registered voters in the precinct as recorded for the 2026 canvass,2026 Registered Voters
+canvass_attempts,integer,Canvass attempts logged by district volunteers. Denominator of prop_a_city_no_canvassing_pct; 0 or blank means no canvass data.,Canvass Attempts
+response_rate,number,Share of canvassed households that responded (fraction 0-1),Canvass Response Rate
+strong_no,integer,Voters canvassers recorded as a 'strong no' -- the numerator of prop_a_city_no_canvassing_pct,Strong No (Canvassed)
+2026_turnout,integer,Turnout recorded for the 2026 election in the canvassing workbooks,2026 Turnout
+2026_bond,integer,2026 bond measure votes recorded in the canvassing workbooks,2026 Bond Votes
+2026_talarico,integer,2026 Talarico votes recorded in the canvassing workbooks,2026 Talarico Votes
+2026_hinojosa,integer,2026 Hinojosa votes recorded in the canvassing workbooks,2026 Hinojosa Votes
+source_file,text,"Filename of the .ods workbook the row came from, for provenance.",Source Workbook
+census_vtd_id,text,"Census voting-district identifier from the county precinct-to-VTD crosswalk. One precinct maps to several VTDs, so a precinct appears on one row per VTD.",Census VTD ID
+share_of_vtd,number,Share of this census VTD that falls inside the precinct (fraction 0-1).,Share of VTD in Precinct
+share_of_county_precinct,number,"Share of the county precinct covered by this census VTD (fraction 0-1); sums to 1 across a precinct's VTDs except precinct 1057, which is recorded in two districts.",Share of County Precinct
+census_vtd_geoid,text,Full Census GEOID of the voting district; join key to the demographic export's `source_ref`.,Census VTD GEOID
+district_id,text,The seat's id on the site: body:jurisdiction:source_ref. The join key to every related file.,District id
+name,text,"The seat's name, for example Hudson County or Ward 3.",Name
+body,text,"The kind of seat: county, county_subdivision (a town), municipality (a place), ward, council_district, school_district, precinct, us_house, state_senate, state_house, .",Body
+state,text,USPS state code.,State
+source_ref,text,"The seat's code at its source, usually a Census GEOID (a 11-character GEOID20 for a precinct). Joined to `census_vtd_geoid` from the precinct-to-VTD crosswalk.",Census code
+population,integer,ACS total population,Population
+land_area_sq_m,number,Land area in square metres,Land area
+acs_release,integer,The ACS 5-year release the figures are from,ACS release
+acs_lines_match_current,boolean,The profile's acs_lines_match_current figure. true or false,Acs lines match current
+cvap_total,number,The profile's cvap_total figure. A number (shares are fractions from 0 to 1),Cvap total
+cvap_total_moe,number,The profile's cvap_total_moe figure. A number (shares are fractions from 0 to 1),Cvap total moe
+fb_pct_africa,number,The profile's fb_pct_africa figure. A number (shares are fractions from 0 to 1),Foreign born percent africa
+fb_pct_asia,number,The profile's fb_pct_asia figure. A number (shares are fractions from 0 to 1),Foreign born percent asia
+fb_pct_europe,number,The profile's fb_pct_europe figure. A number (shares are fractions from 0 to 1),Foreign born percent europe
+fb_pct_latin_america,number,The profile's fb_pct_latin_america figure. A number (shares are fractions from 0 to 1),Foreign born percent latin america
+foreign_born,number,The profile's foreign_born figure. A number (shares are fractions from 0 to 1),Percent Foreign born
+housing_units,number,The profile's housing_units figure. A number (shares are fractions from 0 to 1),Housing units
+median_age,number,The profile's median_age figure. A number (shares are fractions from 0 to 1),Median age
+median_household_income,number,The profile's median_household_income figure. A number (shares are fractions from 0 to 1),Median household income
+not_us_citizen,number,The profile's not_us_citizen figure. A number (shares are fractions from 0 to 1),Not us citizen
+pct_age_18_64,number,The profile's pct_age_18_64 figure. A number (shares are fractions from 0 to 1),Percent age 18 64
+pct_age_20_39,number,The profile's pct_age_20_39 figure. A number (shares are fractions from 0 to 1),Percent age 20 39
+pct_bachelors_plus,number,The profile's pct_bachelors_plus figure. A number (shares are fractions from 0 to 1),Percent bachelors plus
+pct_below_poverty,number,The profile's pct_below_poverty figure. A number (shares are fractions from 0 to 1),Percent below poverty
+pct_english_only,number,The profile's pct_english_only figure. A number (shares are fractions from 0 to 1),Percent english only
+pct_family_households,number,The profile's pct_family_households figure. A number (shares are fractions from 0 to 1),Percent family households
+pct_female,number,The profile's pct_female figure. A number (shares are fractions from 0 to 1),Percent female
+pct_hispanic,number,The profile's pct_hispanic figure. A number (shares are fractions from 0 to 1),Percent hispanic
+pct_households_snap,number,The profile's pct_households_snap figure. A number (shares are fractions from 0 to 1),Percent households snap
+pct_hs_or_less,number,The profile's pct_hs_or_less figure. A number (shares are fractions from 0 to 1),Percent hs or less
+pct_income_under_50k,number,The profile's pct_income_under_50k figure. A number (shares are fractions from 0 to 1),Percent income under 50k
+pct_married_couple_households,number,The profile's pct_married_couple_households figure. A number (shares are fractions from 0 to 1),Percent married couple households
+pct_multi_unit,number,The profile's pct_multi_unit figure. A number (shares are fractions from 0 to 1),Percent multi unit
+pct_nh_asian,number,The profile's pct_nh_asian figure. A number (shares are fractions from 0 to 1),Percent nh asian
+pct_nh_black,number,The profile's pct_nh_black figure. A number (shares are fractions from 0 to 1),Percent nh black
+pct_nh_other,number,The profile's pct_nh_other figure. A number (shares are fractions from 0 to 1),Percent nh other
+pct_nh_white,number,The profile's pct_nh_white figure. A number (shares are fractions from 0 to 1),Percent nh white
+pct_owner_occupied,number,The profile's pct_owner_occupied figure. A number (shares are fractions from 0 to 1),Percent owner occupied
+pct_single_unit,number,The profile's pct_single_unit figure. A number (shares are fractions from 0 to 1),Percent single unit
+pct_spanish,number,The profile's pct_spanish figure. A number (shares are fractions from 0 to 1),Percent spanish
+pct_us_born,number,The profile's pct_us_born figure. A number (shares are fractions from 0 to 1),Percent us born
+pct_vacant,number,The profile's pct_vacant figure. A number (shares are fractions from 0 to 1),Percent vacant
+population_per_sq_mi,number,The profile's population_per_sq_mi figure. A number (shares are fractions from 0 to 1),Population per sq mi
+registered_active,number,The profile's registered_active figure. A number (shares are fractions from 0 to 1),Registered active
+registered_active_per_cvap,number,The profile's registered_active_per_cvap figure. A number (shares are fractions from 0 to 1),Registered active per cvap
+registered_total,number,The profile's registered_total figure. A number (shares are fractions from 0 to 1),Registered total
+registered_total_per_cvap,number,The profile's registered_total_per_cvap figure. A number (shares are fractions from 0 to 1),Registered total per cvap
+voted_total,number,The profile's voted_total figure. A number (shares are fractions from 0 to 1),Voted total
+voted_total_per_cvap,number,The profile's voted_total_per_cvap figure. A number (shares are fractions from 0 to 1),Voted total per cvap
+voted_total_per_registered_total,number,The profile's voted_total_per_registered_total figure. A number (shares are fractions from 0 to 1),Voted total per registered total
+president_2020_dem_share,number,2020: The Democratic share of the two-party vote (0 to 1),2020 democratic share
+president_2020_margin,number,2020: (Democratic - Republican) / total votes: positive means the Democrat led,2020 margin
+president_2020_total_votes,integer,"2020: Total votes counted for the seat",2020 total votes
+president_2024_dem_share,number,2024: The Democratic share of the two-party vote (0 to 1),2024 democratic share
+president_2024_margin,number,2024: (Democratic - Republican) / total votes: positive means the Democrat led,2024 margin
+president_2024_total_votes,number,2024: Total votes counted for the seat,2024 total votes
+opportunity_sanders_avg,number,Sanders's average share of the Democratic primaries (2016 and 2020),Sanders primary share
+opportunity_sanders_margin_avg,number,"Sanders's average margin over the strongest other candidate, in points",Sanders margin
+prop_a_city_against_election_day,integer,"Votes AGAINST City of Dallas Proposition A cast on election day (sheet 72 column G), summed across the sheet's sub-precinct rows for this precinct",Prop A (City) Against - Election Day
+prop_a_city_against_ev_in_person,integer,Votes AGAINST City of Dallas Proposition A cast early in person (sheet 72 column H),Prop A (City) Against - Early In Person
+prop_a_city_against_ev_mail,integer,Votes AGAINST City of Dallas Proposition A cast by mail during early voting (sheet 72 column I),Prop A (City) Against - Early Vote By Mail
+prop_a_city_against_total_votes,integer,Total votes AGAINST City of Dallas Proposition A (sheet 72 column J; equals columns G+H+I on every row). Numerator of prop_a_city_no_actual_pct,Prop A (City) Against - Total
+prop_a_city_total_votes,integer,"Total votes cast on City of Dallas Proposition A, FOR and AGAINST combined (sheet 72 column K). Note: the sheet's 'Against (En contra)' header spans only G-J, so K is the ballot-question total, not an Against subtotal. Denominator of prop_a_city_no_actual_pct",Prop A (City) Total Votes
+prop_a_city_source_rows,integer,How many sheet-72 sub-precinct rows were summed into this precinct. '1' for most; 1063 and 4086 have two,Prop A (City) Source Row Count
+prop_a_city_precinct_code,text,"The sheet-72 `Precinct` code(s) that matched this precinct, pipe-separated when more than one was summed (e.g. '1063-01|1063-03')",Prop A (City) Source Precinct Codes
+prop_a_city_no_canvassing_pct,number,"strong_no / canvass_attempts: share of a precinct's *canvassed* voters recorded as a strong no. A canvass-coverage proxy, not an election result; blank where attempts are 0 or missing (73 of 97 rows).",Prop A No Share (Canvassed)
+prop_a_city_no_actual_pct,number,"prop_a_city_against_total_votes / prop_a_city_total_votes: the share who actually voted against City of Dallas Proposition A. Populated for 96 of 97 rows; blank only for precinct 1046, which has no row on sheet 72.",Prop A No Share (Actual Result)
+pct_renter_occupied,number,"1 - pct_owner_occupied: the renter-occupied share of occupied housing units (fraction 0-1). Note pct_owner_occupied is a share of *occupied* units while pct_vacant is a share of *all* units, so this field excludes vacant stock and renter + vacant does not always sum to 1. Blank where the source owner share is missing (9 rows, all empty or zero-housing geographies).",Percent Renter Occupied

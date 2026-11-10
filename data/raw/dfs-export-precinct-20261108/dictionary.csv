@@ -1,0 +1,59 @@
+column,group,label,type,description
+district_id,identity,District id,text,The seat's id on the site: body:jurisdiction:source_ref. The join key to every related file.
+name,identity,Name,text,"The seat's name, for example Hudson County or Ward 3."
+body,identity,Body,text,"The kind of seat: county, county_subdivision (a town), municipality (a place), ward, council_district, school_district, precinct, us_house, state_senate, state_house, ..."
+state,identity,State,text,USPS state code.
+source_ref,identity,Census code,text,"The seat's code at its source, usually a Census GEOID (a 11-character GEOID20 for a precinct)."
+population,demographics,Population,integer,ACS total population.
+land_area_sq_m,demographics,Land area,number,Land area in square metres.
+acs_release,demographics,ACS release,integer,The ACS 5-year release the figures are from.
+acs_lines_match_current,demographics,Acs lines match current,boolean,The profile's acs_lines_match_current figure. true or false.
+cvap_total,demographics,Cvap total,number,The profile's cvap_total figure. A number (shares are fractions from 0 to 1).
+cvap_total_moe,demographics,Cvap total moe,number,The profile's cvap_total_moe figure. A number (shares are fractions from 0 to 1).
+fb_pct_africa,demographics,Fb pct africa,number,The profile's fb_pct_africa figure. A number (shares are fractions from 0 to 1).
+fb_pct_asia,demographics,Fb pct asia,number,The profile's fb_pct_asia figure. A number (shares are fractions from 0 to 1).
+fb_pct_europe,demographics,Fb pct europe,number,The profile's fb_pct_europe figure. A number (shares are fractions from 0 to 1).
+fb_pct_latin_america,demographics,Fb pct latin america,number,The profile's fb_pct_latin_america figure. A number (shares are fractions from 0 to 1).
+foreign_born,demographics,Foreign born,number,The profile's foreign_born figure. A number (shares are fractions from 0 to 1).
+housing_units,demographics,Housing units,number,The profile's housing_units figure. A number (shares are fractions from 0 to 1).
+median_age,demographics,Median age,number,The profile's median_age figure. A number (shares are fractions from 0 to 1).
+median_household_income,demographics,Median household income,number,The profile's median_household_income figure. A number (shares are fractions from 0 to 1).
+not_us_citizen,demographics,Not us citizen,number,The profile's not_us_citizen figure. A number (shares are fractions from 0 to 1).
+pct_age_18_64,demographics,Pct age 18 64,number,The profile's pct_age_18_64 figure. A number (shares are fractions from 0 to 1).
+pct_age_20_39,demographics,Pct age 20 39,number,The profile's pct_age_20_39 figure. A number (shares are fractions from 0 to 1).
+pct_bachelors_plus,demographics,Pct bachelors plus,number,The profile's pct_bachelors_plus figure. A number (shares are fractions from 0 to 1).
+pct_below_poverty,demographics,Pct below poverty,number,The profile's pct_below_poverty figure. A number (shares are fractions from 0 to 1).
+pct_english_only,demographics,Pct english only,number,The profile's pct_english_only figure. A number (shares are fractions from 0 to 1).
+pct_family_households,demographics,Pct family households,number,The profile's pct_family_households figure. A number (shares are fractions from 0 to 1).
+pct_female,demographics,Pct female,number,The profile's pct_female figure. A number (shares are fractions from 0 to 1).
+pct_hispanic,demographics,Pct hispanic,number,The profile's pct_hispanic figure. A number (shares are fractions from 0 to 1).
+pct_households_snap,demographics,Pct households snap,number,The profile's pct_households_snap figure. A number (shares are fractions from 0 to 1).
+pct_hs_or_less,demographics,Pct hs or less,number,The profile's pct_hs_or_less figure. A number (shares are fractions from 0 to 1).
+pct_income_under_50k,demographics,Pct income under 50k,number,The profile's pct_income_under_50k figure. A number (shares are fractions from 0 to 1).
+pct_married_couple_households,demographics,Pct married couple households,number,The profile's pct_married_couple_households figure. A number (shares are fractions from 0 to 1).
+pct_multi_unit,demographics,Pct multi unit,number,The profile's pct_multi_unit figure. A number (shares are fractions from 0 to 1).
+pct_nh_asian,demographics,Pct nh asian,number,The profile's pct_nh_asian figure. A number (shares are fractions from 0 to 1).
+pct_nh_black,demographics,Pct nh black,number,The profile's pct_nh_black figure. A number (shares are fractions from 0 to 1).
+pct_nh_other,demographics,Pct nh other,number,The profile's pct_nh_other figure. A number (shares are fractions from 0 to 1).
+pct_nh_white,demographics,Pct nh white,number,The profile's pct_nh_white figure. A number (shares are fractions from 0 to 1).
+pct_owner_occupied,demographics,Pct owner occupied,number,The profile's pct_owner_occupied figure. A number (shares are fractions from 0 to 1).
+pct_single_unit,demographics,Pct single unit,number,The profile's pct_single_unit figure. A number (shares are fractions from 0 to 1).
+pct_spanish,demographics,Pct spanish,number,The profile's pct_spanish figure. A number (shares are fractions from 0 to 1).
+pct_us_born,demographics,Pct us born,number,The profile's pct_us_born figure. A number (shares are fractions from 0 to 1).
+pct_vacant,demographics,Pct vacant,number,The profile's pct_vacant figure. A number (shares are fractions from 0 to 1).
+population_per_sq_mi,demographics,Population per sq mi,number,The profile's population_per_sq_mi figure. A number (shares are fractions from 0 to 1).
+registered_active,demographics,Registered active,number,The profile's registered_active figure. A number (shares are fractions from 0 to 1).
+registered_active_per_cvap,demographics,Registered active per cvap,number,The profile's registered_active_per_cvap figure. A number (shares are fractions from 0 to 1).
+registered_total,demographics,Registered total,number,The profile's registered_total figure. A number (shares are fractions from 0 to 1).
+registered_total_per_cvap,demographics,Registered total per cvap,number,The profile's registered_total_per_cvap figure. A number (shares are fractions from 0 to 1).
+voted_total,demographics,Voted total,number,The profile's voted_total figure. A number (shares are fractions from 0 to 1).
+voted_total_per_cvap,demographics,Voted total per cvap,number,The profile's voted_total_per_cvap figure. A number (shares are fractions from 0 to 1).
+voted_total_per_registered_total,demographics,Voted total per registered total,number,The profile's voted_total_per_registered_total figure. A number (shares are fractions from 0 to 1).
+president_2020_dem_share,president,2020 democratic share,number,2020: The Democratic share of the two-party vote (0 to 1).
+president_2020_margin,president,2020 margin,number,2020: (Democratic - Republican) / total votes: positive means the Democrat led.
+president_2020_total_votes,president,2020 total votes,number,2020: Total votes counted for the seat.
+president_2024_dem_share,president,2024 democratic share,number,2024: The Democratic share of the two-party vote (0 to 1).
+president_2024_margin,president,2024 margin,number,2024: (Democratic - Republican) / total votes: positive means the Democrat led.
+president_2024_total_votes,president,2024 total votes,number,2024: Total votes counted for the seat.
+opportunity_sanders_avg,opportunity,Sanders primary share,number,Sanders's average share of the Democratic primaries (2016 and 2020).
+opportunity_sanders_margin_avg,opportunity,Sanders margin,number,"Sanders's average margin over the strongest other candidate, in points."

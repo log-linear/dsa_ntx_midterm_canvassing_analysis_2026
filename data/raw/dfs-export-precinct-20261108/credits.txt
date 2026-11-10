@@ -1,0 +1,15 @@
+Data for Socialism data export: sources and credits
+
+Identity
+  Geographies: U.S. Census Bureau cartographic boundary files (counties, county subdivisions, places, school districts, voting districts, congressional and state legislative districts), with state and local sources for some wards and council districts, as collected by the Data for Socialism pipeline.
+
+Demographics
+  Demographics: U.S. Census Bureau American Community Survey 5-year estimates (the release is the acs_release column). Figures for areas that are not Census units (wards, council districts, voting districts) are estimates shared out from smaller Census areas, not published counts.
+
+Presidential results
+  Presidential results on current district lines are ESTIMATES allocated from precinct results, not certified totals; error_pts is the expected average error of the two-party share, in points. Precinct returns come from VEST (Harvard Dataverse, CC BY) and the other sources the pipeline names.
+
+Opportunity
+  Opportunity scores are Data for Socialism's own provisional scoring (method: opportunities.html on the site). They have not been validated against how left challengers actually fared.
+
+An empty cell means there is no figure for that row: it is never a zero. A column ending in _json holds JSON text. dictionary.csv says what every column means; spec.json is the request that made this file.
