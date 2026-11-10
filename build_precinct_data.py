@@ -1,7 +1,7 @@
 """Build data/precinct_data.csv.
 
 Pipeline
-1. Read every sheet of every ``data/*.ods`` file (each sheet is one precinct
+1. Read every sheet of every ``data/raw/*.ods`` file (each sheet is one precinct
    group within a council district).
 2. Remove cells that hold a formula -- in these files that is the per-sheet
    ``SUM`` "total voters" row, which disappears entirely once its formula
@@ -12,9 +12,11 @@ Pipeline
    one table.  Headers are normalised so near-duplicates such as
    "2024 Prop R (for)" / "2024 Prop R (For)" collapse into a single column;
    columns missing from a sheet are left blank.
-4. LEFT JOIN that union onto ``dallas_vtd_to_county_precinct.csv`` on the
+4. LEFT JOIN that union onto ``data/raw/dallas_vtd_to_county_precinct.csv`` on the
    precinct number (one-to-many: a precinct covers several census VTDs), then
-   onto the DFS export on ``census_vtd_geoid`` == ``source_ref``.
+   onto the DFS export on ``census_vtd_geoid`` == ``source_ref``, then onto
+   ``data/raw/detail.xlsx`` sheet 72 on the precinct number prefix; add
+   ``prop_a_city_no_pct`` = strong_no / canvass_attempts.
 
 ALIGNMENT
 Several District 2 sheets have their metric values keyed one column to the LEFT
@@ -31,6 +33,7 @@ Percentage cells are written as their stored fractions (0.6736 == "67.36%").
 
 import csv
 import re
+from typing import Any
 import warnings
 import zipfile
 import xml.etree.ElementTree as ET
@@ -38,6 +41,7 @@ from collections import OrderedDict
 from pathlib import Path
 
 import openpyxl
+from openpyxl.utils import column_index_from_string
 
 warnings.filterwarnings("ignore", message="Workbook contains no default style")
 
@@ -50,16 +54,17 @@ ALIGN_COL = "sheet_column_alignment"
 
 BASE = Path(__file__).resolve().parent
 DATA = BASE / "data"
-ODS_FILES = sorted(DATA.glob("*.ods"))
-VTD_MAP = DATA / "dallas_vtd_to_county_precinct.csv"
-DFS_CSV = DATA / "dfs-export-precinct-20261108" / "data.csv"
-PROP_A_XLSX = DATA / "detail.xlsx"
+RAW = DATA / "raw"               # every input lives here; DATA holds only output
+ODS_FILES = sorted(RAW.glob("*.ods"))
+VTD_MAP = RAW / "dallas_vtd_to_county_precinct.csv"
+DFS_CSV = RAW / "dfs-export-precinct-20261108" / "data.csv"
+PROP_A_XLSX = RAW / "detail.xlsx"
 PROP_A_SHEET = "72"          # City of Dallas Proposition A (Vote for 1)
 PROP_A_HEADER_ROW = 3        # row 2 holds the merged For/Against group labels
 PROP_A_GROUP_ROW = 2
 PROP_A_FIRST_DATA_ROW = 4
 PROP_A_KEY_PREFIX = 4        # join on the first four chars of `Precinct`
-NO_PCT_COL = "prop_a_city_no_pct"
+NO_PCT_COL = "prop_a_city_no_canvassing_pct"
 OUT = DATA / "precinct_data.csv"
 
 # Sheets disagree on wording/case for the same metric.  UNION aligns columns by
@@ -259,10 +264,10 @@ def load_prop_a():
         None,
     )
     span = list(range(against.min_col, against.max_col + 1)) if against else []
-    if span != [openpyxl.utils.column_index_from_string(l) for l, _ in PROP_A_COLS[:4]]:
+    if span != [column_index_from_string(l) for l, _ in PROP_A_COLS[:4]]:
         print(f"  note: 'Against (En Contra)' spans {against}; requested range was G-K")
 
-    grouped: "OrderedDict[str, list[dict]]" = OrderedDict()
+    grouped: "OrderedDict[str, list[tuple[str, tuple[Any, ...]]]]" = OrderedDict()
     for row in ws.iter_rows(min_row=PROP_A_FIRST_DATA_ROW):
         key = row[0].value
         if key in (None, ""):
@@ -272,11 +277,11 @@ def load_prop_a():
             continue  # the sheet's trailing `Total:` row
         grouped.setdefault(code[:PROP_A_KEY_PREFIX], []).append((code, row))
 
-    records: dict[str, dict] = {}
+    records: "dict[str, dict[str, str]]" = {}
     for prefix, entries in grouped.items():
-        rec = {}
+        rec: "dict[str, str]" = {}
         for letter, name in PROP_A_COLS:
-            idx = openpyxl.utils.column_index_from_string(letter) - 1
+            idx = column_index_from_string(letter) - 1
             nums = [as_number(row[idx].value) for _, row in entries]
             nums = [n for n in nums if n is not None]
             rec[name] = fmt_number(sum(nums)) if nums else ""
@@ -313,7 +318,7 @@ def main() -> None:
     dfs_rows, dfs_cols = load_csv(DFS_CSV)
     prop_a, prop_a_cols = load_prop_a()
 
-    by_precinct: dict[str, list[dict]] = {}
+    by_precinct: "dict[str, list[dict[str, str]]]" = {}
     for r in map_rows:
         by_precinct.setdefault(r["dallas_county_precinct_id"].strip(), []).append(r)
     by_geoid = {r["source_ref"].strip(): r for r in dfs_rows}
@@ -366,7 +371,7 @@ def main() -> None:
         writer.writerows(rows)
 
     repaired = [f"{r['source_file']}/{r[GROUP_COL]}/{r[PRECINCT_COL]}" for r in union if r[ALIGN_COL] != "aligned"]
-    groups: dict[str, list[str]] = {}
+    groups: "dict[str, list[str]]" = {}
     for r in union:
         groups.setdefault(r[PRECINCT_COL], []).append(f"{r['district']}/{r[GROUP_COL]}")
     dups = {p: g for p, g in groups.items() if len(g) > 1}
