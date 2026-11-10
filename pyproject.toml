@@ -6,5 +6,6 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "odfpy>=1.4.1",
+    "openpyxl>=3.1.5",
     "visidata>=3.5",
 ]

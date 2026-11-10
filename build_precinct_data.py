@@ -31,10 +31,15 @@ Percentage cells are written as their stored fractions (0.6736 == "67.36%").
 
 import csv
 import re
+import warnings
 import zipfile
 import xml.etree.ElementTree as ET
 from collections import OrderedDict
 from pathlib import Path
+
+import openpyxl
+
+warnings.filterwarnings("ignore", message="Workbook contains no default style")
 
 TABLE = "{urn:oasis:names:tc:opendocument:xmlns:table:1.0}"
 OFFICE = "{urn:oasis:names:tc:opendocument:xmlns:office:1.0}"
@@ -48,6 +53,13 @@ DATA = BASE / "data"
 ODS_FILES = sorted(DATA.glob("*.ods"))
 VTD_MAP = DATA / "dallas_vtd_to_county_precinct.csv"
 DFS_CSV = DATA / "dfs-export-precinct-20261108" / "data.csv"
+PROP_A_XLSX = DATA / "detail.xlsx"
+PROP_A_SHEET = "72"          # City of Dallas Proposition A (Vote for 1)
+PROP_A_HEADER_ROW = 3        # row 2 holds the merged For/Against group labels
+PROP_A_GROUP_ROW = 2
+PROP_A_FIRST_DATA_ROW = 4
+PROP_A_KEY_PREFIX = 4        # join on the first four chars of `Precinct`
+NO_PCT_COL = "prop_a_city_no_pct"
 OUT = DATA / "precinct_data.csv"
 
 # Sheets disagree on wording/case for the same metric.  UNION aligns columns by
@@ -195,6 +207,94 @@ def load_csv(path: Path):
         return list(reader), list(reader.fieldnames or [])
 
 
+# Sheet 72 column letters -> output names.  The merged group label
+# `Against (En Contra)` actually spans G2:J2; column K is labelled `Total` and
+# holds each precinct's grand total (For + Against).  It is kept because the
+# request named G-K, but it is named as a total rather than an Against figure.
+PROP_A_COLS = [
+    ("G", "prop_a_city_against_election_day"),
+    ("H", "prop_a_city_against_ev_in_person"),
+    ("I", "prop_a_city_against_ev_mail"),
+    ("J", "prop_a_city_against_total_votes"),
+    ("K", "prop_a_city_total_votes"),
+]
+PROP_A_ROW_COUNT_COL = "prop_a_city_source_rows"
+PROP_A_CODES_COL = "prop_a_city_precinct_code"
+
+
+def as_number(value):
+    """Numeric value of a cell: xlsx gives ints, the .ods union gives strings."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip().replace(",", "")
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def fmt_number(num):
+    return str(int(num)) if float(num).is_integer() else str(num)
+
+
+def load_prop_a():
+    """Aggregate sheet 72 (City of Dallas Proposition A) by precinct prefix.
+
+    Keys look like `1063-01`, so joining on the first four characters can match
+    more than one sheet row (sub-precincts).  Vote counts are summed per prefix
+    and the contributing codes are reported, so the fan-out is auditable rather
+    than silently dropped or duplicated.
+    """
+    ws = openpyxl.load_workbook(PROP_A_XLSX)[PROP_A_SHEET]
+    against = next(
+        (
+            m
+            for m in ws.merged_cells.ranges
+            if "against" in str(ws.cell(m.min_row, m.min_col).value or "").lower()
+        ),
+        None,
+    )
+    span = list(range(against.min_col, against.max_col + 1)) if against else []
+    if span != [openpyxl.utils.column_index_from_string(l) for l, _ in PROP_A_COLS[:4]]:
+        print(f"  note: 'Against (En Contra)' spans {against}; requested range was G-K")
+
+    grouped: "OrderedDict[str, list[dict]]" = OrderedDict()
+    for row in ws.iter_rows(min_row=PROP_A_FIRST_DATA_ROW):
+        key = row[0].value
+        if key in (None, ""):
+            continue
+        code = str(key).strip()
+        if not re.match(r"^[0-9A-Za-z]{4}-", code):
+            continue  # the sheet's trailing `Total:` row
+        grouped.setdefault(code[:PROP_A_KEY_PREFIX], []).append((code, row))
+
+    records: dict[str, dict] = {}
+    for prefix, entries in grouped.items():
+        rec = {}
+        for letter, name in PROP_A_COLS:
+            idx = openpyxl.utils.column_index_from_string(letter) - 1
+            nums = [as_number(row[idx].value) for _, row in entries]
+            nums = [n for n in nums if n is not None]
+            rec[name] = fmt_number(sum(nums)) if nums else ""
+        rec[PROP_A_ROW_COUNT_COL] = str(len(entries))
+        rec[PROP_A_CODES_COL] = "|".join(code for code, _ in entries)
+        records[prefix] = rec
+    columns = [n for _, n in PROP_A_COLS] + [PROP_A_ROW_COUNT_COL, PROP_A_CODES_COL]
+    return records, columns
+
+
+def no_pct(strong_no, canvass_attempts):
+    """prop_a_city_no_pct = strong_no / canvass attempts (blank if not computable)."""
+    numerator, denominator = as_number(strong_no), as_number(canvass_attempts)
+    if numerator is None or denominator in (None, 0):
+        return ""
+    return fmt_number(round(numerator / denominator, 6))
+
+
 def main() -> None:
     union, union_cols = read_ods_tables()
 
@@ -211,6 +311,7 @@ def main() -> None:
 
     map_rows, map_cols = load_csv(VTD_MAP)
     dfs_rows, dfs_cols = load_csv(DFS_CSV)
+    prop_a, prop_a_cols = load_prop_a()
 
     by_precinct: dict[str, list[dict]] = {}
     for r in map_rows:
@@ -218,19 +319,33 @@ def main() -> None:
     by_geoid = {r["source_ref"].strip(): r for r in dfs_rows}
 
     key_cols = [PRECINCT_COL, GROUP_COL, "district", ALIGN_COL]
+    join_cols = (
+        [c for c in map_cols if c != "dallas_county_precinct_id"]
+        + dfs_cols
+        + prop_a_cols
+        + [NO_PCT_COL]
+    )
     out_cols = (
         key_cols
         + [c for c in union_cols if c not in key_cols + ["source_file"]]
         + ["source_file"]
-        + [c for c in map_cols if c != "dallas_county_precinct_id"]
-        + dfs_cols
+        + join_cols
     )
 
-    rows, unmatched_vtd, unmatched_dfs = [], [], []
+    rows, unmatched_vtd, unmatched_dfs, unmatched_prop = [], [], [], []
     for rec in union:
+        # Precinct-level figures from detail.xlsx, keyed on the precinct number
+        # (the first four characters of that sheet's `Precinct` column).
+        pa = prop_a.get(rec[PRECINCT_COL], {})
+        if not pa:
+            unmatched_prop.append(rec[PRECINCT_COL])
+        derived = {
+            **{c: "" for c in prop_a_cols},
+            NO_PCT_COL: no_pct(rec.get("strong_no"), rec.get("canvass_attempts")),
+        }
         matches = by_precinct.get(rec[PRECINCT_COL])
         if not matches:  # keep the union row even if unmapped
-            rows.append({**rec, **{c: "" for c in map_cols + dfs_cols}})
+            rows.append({**rec, **derived, **{c: "" for c in map_cols + dfs_cols}})
             unmatched_vtd.append(rec[PRECINCT_COL])
             continue
         for m in matches:
@@ -241,6 +356,8 @@ def main() -> None:
                 merged.update({c: "" for c in dfs_cols})
             else:
                 merged.update(dfs)
+            merged.update(pa)
+            merged[NO_PCT_COL] = derived[NO_PCT_COL]
             rows.append(merged)
 
     with open(OUT, "w", newline="") as fh:
@@ -262,8 +379,18 @@ def main() -> None:
     print(f"rows repaired for alignment ({len(repaired)}):")
     for r in repaired:
         print(f"    {r}")
+    union_keys = {r[PRECINCT_COL] for r in union}
+    fanned = {
+        p: v[PROP_A_CODES_COL]
+        for p, v in prop_a.items()
+        if p in union_keys and v[PROP_A_ROW_COUNT_COL] != "1"
+    }
     print(f"union precincts missing from VTD map : {sorted(set(unmatched_vtd))}")
     print(f"VTD geoids missing from DFS export   : {sorted(set(unmatched_dfs))}")
+    print(f"sheet 72 rows for this sheet         : {sum(int(v[PROP_A_ROW_COUNT_COL]) for v in prop_a.values())} across {len(prop_a)} precinct prefixes")
+    print(f"union precincts missing from detail.xlsx sheet {PROP_A_SHEET}: {sorted(set(unmatched_prop))}")
+    print(f"precincts whose prefix matched >1 sheet-72 row (values summed) : {fanned}")
+    print(f"rows with a computed {NO_PCT_COL}: {sum(1 for r in rows if r.get(NO_PCT_COL))} / {len(rows)}")
     print(f"precinct numbers in >1 sheet group   : {dups}")
     print(f"wrote {OUT}")
 
