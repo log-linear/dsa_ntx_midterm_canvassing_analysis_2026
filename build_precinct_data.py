@@ -16,7 +16,8 @@ Pipeline
    precinct number (one-to-many: a precinct covers several census VTDs), then
    onto the DFS export on ``census_vtd_geoid`` == ``source_ref``, then onto
    ``data/raw/detail.xlsx`` sheet 72 on the precinct number prefix; add
-   ``prop_a_city_no_pct`` = strong_no / canvass_attempts.
+   ``prop_a_city_no_canvassing_pct`` = strong_no / canvass_attempts and
+   ``prop_a_city_no_actual_pct`` = Against total / Total votes cast.
 
 ALIGNMENT
 Several District 2 sheets have their metric values keyed one column to the LEFT
@@ -64,7 +65,8 @@ PROP_A_HEADER_ROW = 3        # row 2 holds the merged For/Against group labels
 PROP_A_GROUP_ROW = 2
 PROP_A_FIRST_DATA_ROW = 4
 PROP_A_KEY_PREFIX = 4        # join on the first four chars of `Precinct`
-NO_PCT_COL = "prop_a_city_no_canvassing_pct"
+NO_PCT_COL = "prop_a_city_no_canvassing_pct"   # canvassing proxy: strong_no / canvass_attempts
+NO_ACTUAL_PCT_COL = "prop_a_city_no_actual_pct"  # actual result: Against votes / Total votes
 OUT = DATA / "precinct_data.csv"
 
 # Sheets disagree on wording/case for the same metric.  UNION aligns columns by
@@ -292,12 +294,17 @@ def load_prop_a():
     return records, columns
 
 
-def no_pct(strong_no, canvass_attempts):
-    """prop_a_city_no_pct = strong_no / canvass attempts (blank if not computable)."""
-    numerator, denominator = as_number(strong_no), as_number(canvass_attempts)
+def ratio(numerator_raw, denominator_raw):
+    """numerator / denominator as text, blank when either is missing/invalid."""
+    numerator, denominator = as_number(numerator_raw), as_number(denominator_raw)
     if numerator is None or denominator in (None, 0):
         return ""
     return fmt_number(round(numerator / denominator, 6))
+
+
+# Two independent "Prop A No" shares per precinct:
+#   NO_PCT_COL         canvassing proxy  -- strong_no / canvass_attempts
+#   NO_ACTUAL_PCT_COL  actual result     -- Against total / Total votes cast
 
 
 def main() -> None:
@@ -328,7 +335,7 @@ def main() -> None:
         [c for c in map_cols if c != "dallas_county_precinct_id"]
         + dfs_cols
         + prop_a_cols
-        + [NO_PCT_COL]
+        + [NO_PCT_COL, NO_ACTUAL_PCT_COL]
     )
     out_cols = (
         key_cols
@@ -346,11 +353,16 @@ def main() -> None:
             unmatched_prop.append(rec[PRECINCT_COL])
         derived = {
             **{c: "" for c in prop_a_cols},
-            NO_PCT_COL: no_pct(rec.get("strong_no"), rec.get("canvass_attempts")),
+            NO_PCT_COL: ratio(rec.get("strong_no"), rec.get("canvass_attempts")),
+            NO_ACTUAL_PCT_COL: "",
         }
         matches = by_precinct.get(rec[PRECINCT_COL])
         if not matches:  # keep the union row even if unmapped
-            rows.append({**rec, **derived, **{c: "" for c in map_cols + dfs_cols}})
+            row = {**rec, **derived, **{c: "" for c in map_cols + dfs_cols}}
+            row[NO_ACTUAL_PCT_COL] = ratio(
+                row.get("prop_a_city_against_total_votes"), row.get("prop_a_city_total_votes")
+            )
+            rows.append(row)
             unmatched_vtd.append(rec[PRECINCT_COL])
             continue
         for m in matches:
@@ -363,6 +375,9 @@ def main() -> None:
                 merged.update(dfs)
             merged.update(pa)
             merged[NO_PCT_COL] = derived[NO_PCT_COL]
+            merged[NO_ACTUAL_PCT_COL] = ratio(
+                merged.get("prop_a_city_against_total_votes"), merged.get("prop_a_city_total_votes")
+            )
             rows.append(merged)
 
     with open(OUT, "w", newline="") as fh:
@@ -395,7 +410,8 @@ def main() -> None:
     print(f"sheet 72 rows for this sheet         : {sum(int(v[PROP_A_ROW_COUNT_COL]) for v in prop_a.values())} across {len(prop_a)} precinct prefixes")
     print(f"union precincts missing from detail.xlsx sheet {PROP_A_SHEET}: {sorted(set(unmatched_prop))}")
     print(f"precincts whose prefix matched >1 sheet-72 row (values summed) : {fanned}")
-    print(f"rows with a computed {NO_PCT_COL}: {sum(1 for r in rows if r.get(NO_PCT_COL))} / {len(rows)}")
+    for col in (NO_PCT_COL, NO_ACTUAL_PCT_COL):
+        print(f"rows with a computed {col}: {sum(1 for r in rows if r.get(col))} / {len(rows)}")
     print(f"precinct numbers in >1 sheet group   : {dups}")
     print(f"wrote {OUT}")
 
