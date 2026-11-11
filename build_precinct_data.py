@@ -12,13 +12,28 @@ Pipeline
    one table.  Headers are normalised so near-duplicates such as
    "2024 Prop R (for)" / "2024 Prop R (For)" collapse into a single column;
    columns missing from a sheet are left blank.
-4. LEFT JOIN that union onto ``data/raw/dallas_vtd_to_county_precinct.csv`` on the
+4. Collapse the union to one row per precinct (keeping the row with the most
+   data), then LEFT JOIN it onto ``data/raw/dallas_vtd_to_county_precinct.csv`` on the
    precinct number (one-to-many: a precinct covers several census VTDs), then
    onto the DFS export on ``census_vtd_geoid`` == ``source_ref``, then onto
    ``data/raw/detail.xlsx`` sheet 72 on the precinct number prefix; add
    ``prop_a_city_no_canvassing_pct`` = strong_no / canvass_attempts and
    ``prop_a_city_no_actual_pct`` = Against total / Total votes cast and
    ``pct_renter_occupied`` = 1 - pct_owner_occupied.
+5. Collapse the joined output to one row per ``dallas_county_precinct_number``
+   (see ONE ROW PER PRECINCT).  The VTD fan-out produced several rows per
+   precinct with repeated precinct-level values; the joined output keeps the
+   single row per precinct that carries the most data.
+
+ONE ROW PER PRECINCT
+The crosswalk maps a precinct to one to four census VTDs, so joining it fans
+each precinct out to that many rows.  ``dedupe_output_by_precinct()`` collapses
+them back to one row per precinct before writing, keeping the row with the most
+non-blank figures, tie-broken by the largest ``share_of_county_precinct`` --
+i.e. the VTD covering most of the precinct, whose DFS demographics describe it
+best.  The collapsed-away VTDs are reported on stdout (geoid and share) rather
+than silently discarded: their demographics are still reachable through
+``data/raw/dallas_vtd_to_county_precinct.csv`` if a per-VTD grain is wanted.
 
 ALIGNMENT
 Several District 2 sheets have their metric values keyed one column to the LEFT
@@ -66,6 +81,7 @@ PROP_A_HEADER_ROW = 3        # row 2 holds the merged For/Against group labels
 PROP_A_GROUP_ROW = 2
 PROP_A_FIRST_DATA_ROW = 4
 PROP_A_KEY_PREFIX = 4        # join on the first four chars of `Precinct`
+SHARE_COL = "share_of_county_precinct"  # crosswalk: how much of the precinct this VTD covers
 NO_PCT_COL = "prop_a_city_no_canvassing_pct"   # canvassing proxy: strong_no / canvass_attempts
 NO_ACTUAL_PCT_COL = "prop_a_city_no_actual_pct"  # actual result: Against votes / Total votes
 RENTER_COL = "pct_renter_occupied"  # complement of the DFS owner-occupied share
@@ -318,6 +334,104 @@ def ratio(numerator_raw, denominator_raw):
 #   NO_ACTUAL_PCT_COL  actual result     -- Against total / Total votes cast
 
 
+def fullness(rec: "dict[str, str]", columns: "list[str]", skip: "tuple[str, ...]" = ()) -> int:
+    """Count of cells in `columns` that hold a value, i.e. how much data the row has.
+
+    Blank cells are *missing*, not zeros, so a row with a populated `population`
+    and full demographic block outranks a row that is blank at the source.
+    Columns in `skip` are filled on every row and would make the comparison
+    meaningless, so they are not counted.
+    """
+    return sum(1 for c in columns if c not in skip and rec.get(c, "") != "")
+
+
+def dedupe_by_precinct(
+    records: "list[OrderedDict[str, str]]", union_cols: "list[str]"
+) -> "tuple[list[OrderedDict[str, str]], list[str]]":
+    """Collapse the union to one row per precinct, keeping the row with most data.
+
+    A precinct is occasionally canvassed by two districts (1057 sits in both
+    District 2 and District 9's `Casa View` sheets).  The metric columns decide
+    the winner: the row recording more non-blank figures is kept, since the
+    district labels and sheet names are otherwise equally credible.  Ties keep
+    the first occurrence, so the result does not depend on file iteration order.
+    """
+    skip = (PRECINCT_COL, GROUP_COL, "district", ALIGN_COL, "source_file")
+    metrics = [c for c in union_cols if c not in skip]
+
+    def score(rec: "OrderedDict[str, str]") -> int:
+        return fullness(rec, metrics)
+
+    best: "dict[str, OrderedDict[str, str]]" = {}
+    order: "list[str]" = []
+    dropped: "list[str]" = []
+    for rec in records:
+        pid = rec[PRECINCT_COL]
+        if pid not in best:
+            best[pid] = rec
+            order.append(pid)
+            continue
+        incumbent, challenger = best[pid], rec
+        if score(challenger) > score(incumbent):
+            best[pid], loser = challenger, incumbent
+        else:
+            loser = challenger
+        dropped.append(
+            f"{pid}: dropped {loser['district']}/{loser[GROUP_COL]}"
+            f" ({score(loser)} filled) kept {best[pid]['district']}"
+            f"/{best[pid][GROUP_COL]} ({score(best[pid])} filled)"
+        )
+    return [best[pid] for pid in order], dropped
+
+
+def dedupe_output_by_precinct(
+    rows: "list[dict[str, str]]", out_cols: "list[str]"
+) -> "tuple[list[dict[str, str]], list[str]]":
+    """Collapse the joined output to one row per precinct, keeping the fullest.
+
+    The crosswalk fans a precinct out over its census VTDs, so the joined table
+    repeats each precinct on one row per VTD: precinct-level `.ods` figures are
+    identical on those rows, while the DFS demographics differ (a sliver VTD
+    often holds no population at all).  This keeps the one row per precinct
+    that carries the most data, ranked by count of non-blank output columns and
+    tie-broken by the largest `share_of_county_precinct`, so among rows equally
+    full the VTD covering most of the precinct wins.  Provenance and grain
+    columns are excluded from the count: they are filled on every row.
+
+    Original row order is preserved, so the output stays reproducible.
+    """
+    skip = (PRECINCT_COL, GROUP_COL, "district", ALIGN_COL, "source_file")
+    counted = [c for c in out_cols if c not in skip]
+
+    def key(row: "dict[str, str]") -> "tuple[int, float]":
+        # higher sorts first: fullest, then biggest share of the precinct
+        share = as_number(row.get(SHARE_COL))
+        return (fullness(row, counted), share if share is not None else -1.0)
+
+    best: "dict[str, dict[str, str]]" = {}
+    order: "list[str]" = []
+    dropped: "list[str]" = []
+    for row in rows:
+        pid = row[PRECINCT_COL]
+        if pid not in best:
+            best[pid] = row
+            order.append(pid)
+            continue
+        incumbent, challenger = best[pid], row
+        if key(challenger) > key(incumbent):
+            best[pid], loser = challenger, incumbent
+        else:
+            loser = challenger
+        dropped.append(
+            f"{pid}: dropped VTD {loser.get('census_vtd_geoid', '?')}"
+            f" ({fullness(loser, counted)} filled, {loser.get(SHARE_COL, '?')} of precinct)"
+            f" kept {best[pid].get('census_vtd_geoid', '?')}"
+            f" ({fullness(best[pid], counted)} filled,"
+            f" {best[pid].get(SHARE_COL, '?')} of precinct)"
+        )
+    return [best[pid] for pid in order], dropped
+
+
 def main() -> None:
     union, union_cols = read_ods_tables()
 
@@ -330,7 +444,7 @@ def main() -> None:
         if key not in seen:
             seen.add(key)
             deduped.append(rec)
-    union = deduped
+    union, dropped = dedupe_by_precinct(deduped, union_cols)
 
     map_rows, map_cols = load_csv(VTD_MAP)
     dfs_rows, dfs_cols = load_csv(DFS_CSV)
@@ -394,6 +508,10 @@ def main() -> None:
             merged[RENTER_COL] = complement(merged.get("pct_owner_occupied"))
             rows.append(merged)
 
+    # One row per precinct: the VTD fan-out above is a join artifact, not data.
+    fanout_rows = len(rows)
+    rows, dropped_vtd = dedupe_output_by_precinct(rows, out_cols)
+
     with open(OUT, "w", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=out_cols, extrasaction="ignore")
         writer.writeheader()
@@ -406,10 +524,16 @@ def main() -> None:
     dups = {p: g for p, g in groups.items() if len(g) > 1}
 
     print(f"ods files                 : {[p.name for p in ODS_FILES]}")
-    print(f"union rows (deduped)      : {len(union)} over {len(union_cols)} columns")
+    print(f"union rows (precinct-deduped): {len(union)} over {len(union_cols)} columns")
+    print(f"rows dropped as duplicate precinct ({len(dropped)}):")
+    for d in dropped:
+        print(f"    {d}")
     print(f"mapping / dfs rows        : {len(map_rows)} / {len(dfs_rows)}")
     print(f"output rows               : {len(rows)} ({len(set(r[PRECINCT_COL] for r in rows))} precincts)")
     print(f"output columns            : {len(out_cols)}")
+    print(f"rows dropped as duplicate precinct ({fanout_rows - len(rows)} after joining; {len(rows)} precincts x VTDs = {fanout_rows} rows):")
+    for d in dropped_vtd:
+        print(f"    {d}")
     print(f"rows repaired for alignment ({len(repaired)}):")
     for r in repaired:
         print(f"    {r}")

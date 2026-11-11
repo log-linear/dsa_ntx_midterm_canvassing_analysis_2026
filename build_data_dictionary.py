@@ -222,14 +222,14 @@ MANUAL = {
         "number",
         "strong_no / canvass_attempts: share of a precinct's *canvassed* voters "
         "recorded as a strong no. A canvass-coverage proxy, not an election result; "
-        "blank where attempts are 0 or missing (73 of 97 rows).",
+        "blank where canvass attempts are 0 or missing.",
         "Prop A No Share (Canvassed)",
     ),
     "prop_a_city_no_actual_pct": (
         "number",
         "prop_a_city_against_total_votes / prop_a_city_total_votes: the share who "
-        "actually voted against City of Dallas Proposition A. Populated for 96 of 97 "
-        "rows; blank only for precinct 1046, which has no row on sheet 72.",
+        "actually voted against City of Dallas Proposition A. Blank for precincts with no "
+        "matching sheet-72 row (e.g. 1046).",
         "Prop A No Share (Actual Result)",
     ),
     "pct_renter_occupied": (
@@ -238,7 +238,7 @@ MANUAL = {
         "(fraction 0-1). Note pct_owner_occupied is a share of *occupied* units while "
         "pct_vacant is a share of *all* units, so this field excludes vacant stock and "
         "renter + vacant does not always sum to 1. Blank where the source owner share "
-        "is missing (9 rows, all empty or zero-housing geographies).",
+        "is missing (those VTDs also have blank or zero housing_units).",
         "Percent Renter Occupied",
     ),
 }
@@ -297,8 +297,8 @@ def reconcile(field, values, declared):
         final = "text"
 
     parts = []
-    if n_blank and "blank" not in _DESC_CACHE.get(field, "").lower():
-        parts.append(f"blank for {n_blank} of {len(values)} rows")
+    if n_blank and "blank for" not in _DESC_CACHE.get(field, "").lower():
+        parts.append(f"{n_blank} of {len(values)} rows empty" if "blank" in _DESC_CACHE.get(field, "").lower() else f"blank for {n_blank} of {len(values)} rows")
     if sentinels and final in ("integer", "number"):
         parts.append(
             f"{n_sentinel} row(s) hold the literal placeholder "
