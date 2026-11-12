@@ -7,20 +7,26 @@ demographic detail panel.  Every metric is labelled with its `readable_name`
 from data/data_dictionary.csv -- never the raw field name.
 
 The data layer (`fetch_features`, `load_rows`, `build_dictionary`,
-`join_precincts`, `color_scale`, `tooltip_html`) is pure and importable without
-a Streamlit run context, which is what makes the plan's edge-case matrix
+`join_precincts`, `color_scale`, `tooltip_expression`) is pure and importable
+without a Streamlit run context, which is what makes the plan's edge-case matrix
 testable in tests/test_dashboard.py.
+
+Layer props are written in the @deck.gl/json expression grammar, not as Python
+lambdas: Streamlit marks every string prop with `@@=` and the browser *parses*
+it, so `d => d.properties.__color` is a runtime error there, not a function.
 
 Run it with:  uv run streamlit run dashboard.py
 """
 
 from __future__ import annotations
 
-import copy
 import csv
 import json
 import urllib.request
+
+import streamlit as st
 from pathlib import Path
+from typing import Any
 
 BASE = Path(__file__).resolve().parent
 DATA = BASE / "data"
@@ -107,7 +113,7 @@ CACHE_TTL = 900  # seconds; the geometry is "Current" and reflows rarely
 # ---------------------------------------------------------------------------
 # pure data layer -- importable with no Streamlit run context
 # ---------------------------------------------------------------------------
-def fetch_features(url: str = LAYER_URL, timeout: int = 30) -> dict:
+def fetch_features(url: str = LAYER_URL, timeout: int = 30) -> dict[str, Any]:
     """One GeoJSON FeatureCollection of polygons from the live layer.
 
     Stdlib urllib only: no new HTTP dependency.  Raises if the endpoint is
@@ -124,7 +130,7 @@ def fetch_features(url: str = LAYER_URL, timeout: int = 30) -> dict:
     return payload
 
 
-def load_rows(path: Path = IN_CSV) -> list[dict]:
+def load_rows(path: Path = IN_CSV) -> list[dict[str, str]]:
     """The precinct rows as strings, exactly as the CSV holds them.
 
     One row per precinct (the extract is deduplicated) and no numeric value is
@@ -134,7 +140,7 @@ def load_rows(path: Path = IN_CSV) -> list[dict]:
         return list(csv.DictReader(fh))
 
 
-def build_dictionary(path: Path = DICT_CSV) -> dict[str, dict]:
+def build_dictionary(path: Path = DICT_CSV) -> dict[str, dict[str, str]]:
     """field_name -> {data_type, description, readable_name}."""
     with open(path, newline="", encoding="utf-8") as fh:
         return {
@@ -147,7 +153,7 @@ def build_dictionary(path: Path = DICT_CSV) -> dict[str, dict]:
         }
 
 
-def label_for(dictionary: dict[str, dict], field: str) -> str:
+def label_for(dictionary: dict[str, dict[str, str]], field: str) -> str:
     """readable_name for `field`; fails fast and names the field if absent."""
     entry = dictionary.get(field)
     if entry is None:
@@ -210,20 +216,31 @@ def color_scale(value: float | None, domain: tuple[float, float] | None) -> list
     return [round(a + (b - a) * t) for a, b in zip(COLOR_LOW, COLOR_HIGH)]
 
 
-def tooltip_html(dictionary: dict[str, dict], prefix: str = "v_") -> str:
-    """pydeck tooltip template carrying all five choropleth metrics.
+def _js_literal(text: str) -> str:
+    """`text` as a double-quoted literal for the @deck.gl/json expression grammar."""
+    escaped = str(text).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+    return '"' + escaped + '"'
 
-    The template holds `{placeholder}` tokens only; the values are pre-formatted
-    into each feature's properties as `<prefix><field>` by `decorate()`.  All
-    five labels show whichever field is selected for colour.
+
+def tooltip_expression(
+    dictionary: dict[str, dict[str, str]], prefix: str = "v_"
+) -> str:
+    """The hover tooltip as a @deck.gl/json *expression*, not HTML or JS.
+
+    pydeck marks every string layer prop with `@@=`, and the browser parses what
+    follows with the JSON-expression grammar: key lookups, literals, `+` and
+    ternary -- no arrow functions, no `{token}` templates.  The returned string
+    goes into the tooltip's innerText, so labels are concatenated in Python and
+    only the per-precinct values are looked up at hover time.
     """
-    parts = [f"<b>Precinct {{{JOIN_LAYER_KEY}}}</b>"]
+    lines = [_js_literal("Precinct ") + " + " + JOIN_LAYER_KEY]
     for field in CHOROPLETH_FIELDS:
-        parts.append(f"<br/>{label_for(dictionary, field)}: {{{prefix}{field}}}")
-    return "".join(parts)
+        label = label_for(dictionary, field) + ": "
+        lines.append(_js_literal(label) + " + " + prefix + field)
+    return r" + '\n' + ".join(lines)
 
 
-def join_index(rows: list[dict]) -> dict[str, dict]:
+def join_index(rows: list[dict[str, str]]) -> dict[str, dict[str, str]]:
     """Key the CSV by precinct number.  Already one row per precinct, so there
     is no row-picking rule to apply."""
     return {
@@ -233,12 +250,14 @@ def join_index(rows: list[dict]) -> dict[str, dict]:
     }
 
 
-def layer_keys(features: list[dict]) -> set[str]:
+def layer_keys(features: list[dict[str, Any]]) -> set[str]:
     """The layer's NewPrcnt values, as text."""
     return {str(f["properties"].get(JOIN_LAYER_KEY, "")).strip() for f in features}
 
 
-def join_precincts(features: list[dict], rows: list[dict]) -> dict:
+def join_precincts(
+    features: list[dict[str, Any]], rows: list[dict[str, str]]
+) -> dict[str, Any]:
     """Cardinality of the NewPrcnt <-> dallas_county_precinct_number join."""
     index = join_index(rows)
     in_layer = layer_keys(features)
@@ -252,7 +271,9 @@ def join_precincts(features: list[dict], rows: list[dict]) -> dict:
     }
 
 
-def detail_panel_fields(rows: list[dict], fields: list[str] | None = None) -> list[str]:
+def detail_panel_fields(
+    rows: list[dict[str, str]], fields: list[str] | None = None
+) -> list[str]:
     """Decision 1c: omit fields that are blank in *every* row.
 
     Decided from the data rather than hard-coded, so a field that later gains
@@ -262,46 +283,57 @@ def detail_panel_fields(rows: list[dict], fields: list[str] | None = None) -> li
     return [f for f in fields if any(to_float(r.get(f)) is not None for r in rows)]
 
 
-def bbox(features: list[dict]) -> tuple[float, float, float, float] | None:
+def bbox(features: list[dict[str, Any]]) -> tuple[float, float, float, float] | None:
     """lon/lat extent read straight off the WGS84 coordinates as delivered."""
-    lo = lon_max = lat_min = lat_max = None
-    for f in features:
-        for ring in (f.get("geometry") or {}).get("coordinates") or []:
-            for lon, lat in ring:
-                lo = lon if lo is None else min(lo, lon)
-                lon_max = lon if lon_max is None else max(lon_max, lon)
-                lat_min = lat if lat_min is None else min(lat_min, lat)
-                lat_max = lat if lat_max is None else max(lat_max, lat)
-    if lo is None:
+    points = [
+        (lon, lat)
+        for f in features
+        for ring in (f.get("geometry") or {}).get("coordinates") or []
+        for lon, lat in ring
+    ]
+    if not points:
         return None
-    return lo, lat_min, lon_max, lat_max
+    lons = [p[0] for p in points]
+    lats = [p[1] for p in points]
+    return min(lons), min(lats), max(lons), max(lats)
 
 
-def decorate(features: list[dict], rows: list[dict], field: str) -> dict:
-    """Deep copy of the FeatureCollection with per-feature display properties.
+def decorate(
+    features: list[dict[str, Any]], rows: list[dict[str, str]], field: str
+) -> list[dict[str, Any]]:
+    """One pydeck record per polygon: layer attributes plus display values.
 
-    Per-feature colours must be injected into each feature's `properties`
-    (`__color`); a fixed [r,g,b] would paint every polygon identically.  The
-    pre-formatted tooltip values ride along on `v_<field>`.
+    Records, not the GeoJSON FeatureCollection, because Streamlit's deck.gl
+    bridge iterates `data` directly.  A polygon's rings ride along as
+    `__rings`; colour, match state and the pre-formatted five metrics are plain
+    keys on the record, which is what the accessors below name.
     """
-    fc = copy.deepcopy({"type": "FeatureCollection", "features": features})
     index = join_index(rows)
     domain = domain_for([to_float(r.get(field)) for r in rows])
-    for feature in fc["features"]:
-        props = feature["properties"]
-        row = index.get(str(props.get(JOIN_LAYER_KEY, "")).strip())
-        props["__color"] = color_scale(
+    records = []
+    for feature in features:
+        geometry = feature.get("geometry") or {}
+        coordinates = geometry.get("coordinates") or []
+        record = dict(feature.get("properties") or {})
+        row = index.get(str(record.get(JOIN_LAYER_KEY, "")).strip())
+        record["__rings"] = coordinates if geometry.get("type") == "Polygon" else []
+        record["__color"] = color_scale(
             None if row is None else to_float(row.get(field)), domain
         )
-        props["__matched"] = row is not None
+        record["__matched"] = row is not None
         for choropleth in CHOROPLETH_FIELDS:
-            props["v_" + choropleth] = format_value(
+            record["v_" + choropleth] = format_value(
                 None if row is None else to_float(row.get(choropleth))
             )
-    return fc
+        records.append(record)
+    return records
 
 
-def detail_records(row: dict | None, dictionary: dict[str, dict], fields: list[str]) -> list[dict]:
+def detail_records(
+    row: dict[str, str] | None,
+    dictionary: dict[str, dict[str, str]],
+    fields: list[str],
+) -> list[dict[str, str]]:
     """The detail panel's rows for one precinct, labelled by readable_name only."""
     if row is None:
         return []
@@ -320,7 +352,7 @@ def _pydeck():
     return pdk
 
 
-def _view_state(features: list[dict]):
+def _view_state(features: list[dict[str, Any]]):
     pdk = _pydeck()
     box = bbox(features)
     if box is None:
@@ -334,7 +366,9 @@ def _view_state(features: list[dict]):
     )
 
 
-def build_deck(fc: dict, tooltip: str, features: list[dict]):
+def build_deck(
+    records: list[dict[str, Any]], tooltip: str, features: list[dict[str, Any]]
+):
     """The Deck: PolygonLayer over a free MapLibre basemap, no key.
 
     `map_provider="maplibre"` with a style *URL string*; a dict style would make
@@ -343,12 +377,12 @@ def build_deck(fc: dict, tooltip: str, features: list[dict]):
     pdk = _pydeck()
     layer = pdk.Layer(
         "PolygonLayer",
-        data=fc,
+        data=records,
         id=LAYER_ID,
-        get_fill_color="d => d.properties.__color",
+        get_polygon="__rings",
+        get_fill_color="__color",
         get_line_color=list(LINE_COLOR),
         get_line_width=1.2,
-        line_thickness=1.5,
         pickable=True,
         auto_highlight=True,
         extruded=False,
@@ -362,7 +396,7 @@ def build_deck(fc: dict, tooltip: str, features: list[dict]):
     )
 
 
-def selected_props(selection) -> dict | None:
+def selected_props(selection: Any) -> dict[str, Any] | None:
     """Clicked feature attributes, at .selection.objects[<layer_id>]."""
     inner = getattr(selection, "selection", None)
     objects = getattr(inner, "objects", None) or {}
@@ -374,7 +408,12 @@ def selected_props(selection) -> dict | None:
     return None
 
 
-def _detail_block(row: dict | None, precinct: str, dictionary, panel_fields) -> None:
+def _detail_block(
+    row: dict[str, str] | None,
+    precinct: str,
+    dictionary: dict[str, dict[str, str]],
+    panel_fields: list[str],
+) -> None:
     st.subheader("Precinct detail")
     if row is None:
         st.info(
@@ -395,7 +434,7 @@ def main() -> None:
     dictionary = build_dictionary()
     # Fail fast, before anything renders, if the dictionary cannot name a field.
     labels = {f: label_for(dictionary, f) for f in CHOROPLETH_FIELDS + DETAIL_FIELDS}
-    tooltip = tooltip_html(dictionary)
+    tooltip = tooltip_expression(dictionary)
     panel_fields = detail_panel_fields(rows)
     index = join_index(rows)
 
@@ -428,7 +467,7 @@ def main() -> None:
 
     fc = decorate(features, rows, field)
     stats = join_precincts(features, rows)
-    colored = sum(1 for f in fc["features"] if f["properties"]["__color"] != GREY)
+    colored = sum(1 for record in fc if record["__color"] != GREY)
 
     chart = st.pydeck_chart(
         build_deck(fc, tooltip, features),
@@ -466,17 +505,10 @@ def main() -> None:
             _detail_block(index.get(precinct), precinct, dictionary, panel_fields)
 
 
-# Resolve Streamlit lazily so the pure data layer above imports without it.
-try:
-    import streamlit as st
-except Exception:  # pragma: no cover - bare import for tests / data use
-    st = None
-
-if st is not None:
-    # Cache geometry so switching the colour field does not refetch 4.6 MB.
-    _cached_features = st.cache_data(ttl=CACHE_TTL)(fetch_features)
+# Cache geometry so switching the colour field does not refetch 4.6 MB.
+_cached_features = st.cache_data(ttl=CACHE_TTL)(fetch_features)
 
 # `streamlit run dashboard.py` executes this file as __main__; a bare `import
 # dashboard` must not start a run, so the pure data layer stays testable.
-if __name__ == "__main__" and st is not None:
+if __name__ == "__main__":
     main()

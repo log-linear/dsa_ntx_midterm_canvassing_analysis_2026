@@ -25,6 +25,27 @@ def ok(name: str, detail: str = "") -> None:
     print(f"PASS  {name}{('  [' + detail + ']') if detail else ''}")
 
 
+def grammar_ok(expr: str, where: str) -> None:
+    """Reject what @deck.gl/json cannot parse: no JS, no {token} templates.
+
+    Streamlit hands the browser every string layer prop prefixed `@@=`, and that
+    prop is *parsed* as a JSON expression -- key lookups, quoted literals, `+`,
+    ternary.  An arrow function throws `Unexpected "=" at character 2` and a
+    `{token}` throws `Unexpected "{"`, both at render time and both invisible to
+    every Python-side check.  Quoted literals are stripped first because labels
+    legitimately contain parentheses.
+    """
+    stripped = re.sub(r'"(?:[^"\\]|\\.)*"', "", expr)
+    stripped = re.sub(r"'(?:[^'\\]|\\.)*'", "", stripped)
+    assert "=>" not in expr, f"{where}: arrow function is not JSON-expression syntax: {expr[:60]!r}"
+    assert "{" not in stripped and "}" not in stripped, (
+        f"{where}: no template placeholders in this grammar: {expr[:60]!r}"
+    )
+    assert "(" not in stripped and ")" not in stripped, (
+        f"{where}: function calls are not allowed in JSON expressions: {expr[:60]!r}"
+    )
+
+
 def expect_raises(exc_type, fn, *args, **kwargs):
     try:
         fn(*args, **kwargs)
@@ -159,21 +180,25 @@ assert "pct_nope" in str(err), err
 ok("missing dictionary entry fails fast naming the field")
 
 # --- tooltip: all five metrics, always ------------------------------------
-template = dashboard.tooltip_html(dictionary)
-placeholders = re.findall(r"\{(v_[^}]+)\}", template)
-assert placeholders == ["v_" + f for f in dashboard.CHOROPLETH_FIELDS], placeholders
-visible = re.sub(r"\{[^}]*\}", "", template)
+template = dashboard.tooltip_expression(dictionary)
+grammar_ok(template, "tooltip")
+refs = re.findall(r"\b(v_\w+)\b", template)
+assert refs == ["v_" + f for f in dashboard.CHOROPLETH_FIELDS], refs
+assert re.search(r"\b" + dashboard.JOIN_LAYER_KEY + r"\b", template), template
+visible = re.sub(r'"(?:[^"\\]|\\.)*"', "", template)
+visible = re.sub(r"'(?:[^'\\]|\\.)*'", "", visible)
+visible = re.sub(r"\bv_\w+\b", "", visible)
 for field in dashboard.CHOROPLETH_FIELDS:
     assert dashboard.label_for(dictionary, field) in template, field
     assert field not in visible, f"raw field name visible in tooltip: {field}"
-ok("tooltip template carries all five labels and five value slots")
+ok("tooltip expression carries all five labels and five value slots")
 
 fc = dashboard.decorate(
     [{"properties": {dashboard.JOIN_LAYER_KEY: key}} for key in ["1046", "999999"]],
     rows,
     zero_field,
 )
-with_data, without_data = (f["properties"] for f in fc["features"])
+with_data, without_data = fc  # decorate() yields records, not features
 for props in (with_data, without_data):
     slots = [k for k in props if k.startswith("v_")]
     assert len(slots) == 5, slots
@@ -225,21 +250,18 @@ populated = {}
 for field in dashboard.CHOROPLETH_FIELDS:
     live = dashboard.decorate(features, rows, field)
     vals = [
-        p["properties"]["v_" + field]
-        for p in live["features"]
-        if p["properties"]["__matched"]
+        r["v_" + field] for r in live if r["__matched"]
     ]
     populated[field] = sum(1 for v in vals if v != dashboard.NO_DATA_TEXT)
-    assert live["type"] == "FeatureCollection"
+    assert isinstance(live, list) and len(live) == 791, len(live)
     assert all(
-        isinstance(p["properties"]["__color"], list) and len(p["properties"]["__color"]) == 3
-        for p in live["features"]
+        isinstance(r["__color"], list) and len(r["__color"]) == 3 for r in live
     )
 ok("per-feature __color injected into properties (not a fixed colour)", str(populated))
 distinct = {
-    tuple(p["properties"]["__color"])
-    for p in dashboard.decorate(features, rows, "2024_kamala")["features"]
-    if p["properties"]["__matched"]
+    tuple(r["__color"])
+    for r in dashboard.decorate(features, rows, "2024_kamala")
+    if r["__matched"]
 }
 assert len(distinct) > 1, distinct
 ok("colours actually vary across precincts", f"{len(distinct)} distinct")
@@ -259,7 +281,23 @@ assert dashboard.LAYER_ID in dj, "layer id missing from the serialised deck"
 emitted = blob["layers"][0]
 assert emitted["id"] == dashboard.LAYER_ID, emitted["id"]
 assert emitted["@@type"] == "PolygonLayer", emitted["@@type"]
-assert emitted["getFillColor"] == "@@=d => d.properties.__color", emitted["getFillColor"]
+# pydeck marks every string layer prop with `@@=` and the browser PARSES what
+# follows, so each must be legal JSON-expression syntax and must name a key the
+# records actually carry.  This is the guard for the render-time crash that no
+# Python-side check could see: `d => d.properties.__color` threw
+# `Unexpected "=" at character 2` in the browser while the suite stayed green.
+for prop, value in emitted.items():
+    if isinstance(value, str) and value.startswith("@@="):
+        grammar_ok(value[3:], prop)
+assert emitted["getFillColor"] == "@@=__color", emitted["getFillColor"]
+assert emitted["getPolygon"] == "@@=__rings", emitted["getPolygon"]
+assert "=>" not in dj, "an arrow function reached the serialised deck"
+record_keys = set(dashboard.decorate(features, rows, "2024_kamala")[0])
+needed = ({dashboard.JOIN_LAYER_KEY, "__color", "__rings"}
+          | {"v_" + f for f in dashboard.CHOROPLETH_FIELDS})
+missing = sorted(needed - record_keys)
+assert not missing, f"an accessor names a key the records do not carry: {missing}"
+ok("every @@= prop is a JSON expression over keys the records have")
 ok("Layer(id=...) is the id pydeck emits and the selection key", dashboard.LAYER_ID)
 
 # Use Streamlit's real event-state types, not a hand-rolled double nesting:
@@ -360,10 +398,10 @@ ok("no selection -> prompt to click, no empty table")
 
 # 707 of 791 polygons hold no CSV row; each still carries all five em-dashes.
 decorated = dashboard.decorate(features, rows, dashboard.DEFAULT_CHOROPLETH)
-bare = [f for f in decorated["features"] if not f["properties"]["__matched"]]
+bare = [r for r in decorated if not r["__matched"]]
 assert len(bare) == 791 - 84, len(bare)
-assert all(f["properties"]["__color"] == dashboard.GREY for f in bare)
-assert all(f["properties"]["v_" + fld] == dashboard.NO_DATA_TEXT for f in bare for fld in dashboard.CHOROPLETH_FIELDS)
+assert all(r["__color"] == dashboard.GREY for r in bare)
+assert all(r["v_" + fld] == dashboard.NO_DATA_TEXT for r in bare for fld in dashboard.CHOROPLETH_FIELDS)
 ok("a precinct with no CSV row is grey and lists all five metrics as em-dashes", f"{len(bare)} of 791")
 
 # Switch field: colours re-scale to that field's range; tooltip values do not move.
@@ -374,13 +412,13 @@ at2.run()
 assert any(f"84 of 791 polygons are coloured by {kamala}" in c.value for c in at2.caption), [c.value for c in at2.caption]
 other = dashboard.decorate(features, rows, "2024_kamala")
 same = all(
-    a["properties"][k] == b["properties"][k]
-    for a, b in zip(decorated["features"], other["features"])
-    for k in a["properties"]
+    a[k] == b[k]
+    for a, b in zip(decorated, other)
+    for k in a
     if k.startswith("v_") or k == "__matched"
 )
 assert same, "tooltip values changed when the colour field changed"
-assert dashboard.tooltip_html(dictionary) == template, "tooltip template is field-dependent"
+assert dashboard.tooltip_expression(dictionary) == template, "tooltip is field-dependent"
 ok("switching field re-scales colour and leaves all five tooltip metrics unchanged")
 
 # Click a polygon whose precinct is in the CSV: 17 labeled metrics, no raw names.
