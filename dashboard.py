@@ -109,8 +109,8 @@ NO_DATA_FIELDS = [
 # item size from the FIRST record and applies it to all of them, so mixing
 # [r,g,b] with [r,g,b,a] misreads the whole scale, not just the blanks.
 NO_DATA_COLOR = [0, 0, 0, 0]
-COLOR_LOW = [247, 222, 195, 255]
-COLOR_HIGH = [112, 0, 91, 255]
+COLOR_LOW = [251, 210, 212]
+COLOR_HIGH = [236, 31, 39, 255]
 NO_DATA_TEXT = "\u2014"  # em-dash: no value, distinct from 0.0
 MAP_STYLE_URL = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
 LAYER_ID = "precincts"  # Layer(id=...) is required or selection state is unkeyed
