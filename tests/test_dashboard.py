@@ -151,10 +151,13 @@ assert len(colored) == len(empty) == 4, (colored, empty)
 assert is_opaque(colored), f"a data-bearing fill went see-through: {colored}"
 ok("0.0000 colours at the scale minimum; blank is transparent", f"domain {domain}")
 
-# Transparency is only safe because the outline stays opaque: it keeps all 791
-# precinct boundaries drawn, so an empty precinct is still visible and pickable.
-assert len(dashboard.LINE_COLOR) == 4 and dashboard.LINE_COLOR[3] == 255, dashboard.LINE_COLOR
-ok("precinct outlines stay opaque while no-data fill is transparent")
+# Borders are gone, so a no-data precinct now paints literally nothing.  What
+# still has to hold is that those invisible polygons are pickable (the fill
+# sublayer is asserted above) and that the dead border colour was not left
+# behind as a second source of truth.
+assert not hasattr(dashboard, "LINE_COLOR"), "LINE_COLOR outlived the borders"
+assert dashboard.NO_DATA_COLOR == [0, 0, 0, 0], dashboard.NO_DATA_COLOR
+ok("no-data precincts are fully empty: transparent fill, no border constant left")
 
 # per-field normalization, never a fixed 0-1
 kamala = dashboard.domain_for([dashboard.to_float(r.get("2024_kamala")) for r in rows])
@@ -318,11 +321,13 @@ for prop, value in emitted.items():
         grammar_ok(value[3:], prop)
 assert emitted["getFillColor"] == "@@=__color", emitted["getFillColor"]
 assert emitted["getPolygon"] == "@@=__rings", emitted["getPolygon"]
-# Numeric props pass through untouched; a string one would be marked `@@=` and
-# read as a record key, so the outline clamp must arrive as a plain number.
-assert emitted["lineWidthMinPixels"] == 1, emitted.get("lineWidthMinPixels")
-assert "lineWidthUnits" not in emitted, "a string unit would ship as @@=pixels and read as a record key"
-ok("line-width clamp serialises as a number, not an @@= string")
+# PolygonLayer defaults stroked:true, so the border only disappears if this
+# ships as a plain boolean false -- a string would be marked `@@=` and read as a
+# record lookup.  No line-styling prop should survive the removal at all.
+assert emitted["stroked"] is False, emitted.get("stroked")
+leftover = sorted(k for k in emitted if "line" in k.lower())
+assert not leftover, f"border props survived the removal: {leftover}"
+ok("stroked serialises as boolean false and no line props remain")
 assert "=>" not in dj, "an arrow function reached the serialised deck"
 record_keys = set(dashboard.decorate(features, rows, "2024_kamala")[0])
 needed = ({dashboard.JOIN_LAYER_KEY, "__color", "__rings"}

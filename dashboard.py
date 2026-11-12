@@ -99,17 +99,18 @@ NO_DATA_FIELDS = [
     "population_per_sq_mi",
 ]
 
-# No data is transparent fill, not a grey wash.  The opaque outline still draws
-# every precinct boundary, so an empty precinct stays visible, hoverable and
-# clickable -- deck.gl's picking pass discards on the picking-validity flag, not
-# on getFillColor's alpha, and renders to an FBO without blending.
+# No data is an empty polygon: transparent fill AND no border (both requested
+# 2026-11-12), so the 707 precincts with no value paint nothing at all and are
+# discoverable only by hovering or clicking.  They stay pickable because deck.gl
+# rasterises the FILL sublayer -- whose shader writes the picking colour -- and
+# that sublayer does not depend on `stroked`; the picking pass renders to an FBO
+# without blending and discards on the picking-validity flag, never on alpha.
 # Every fill carries an explicit alpha.  deck.gl takes the colour attribute's
 # item size from the FIRST record and applies it to all of them, so mixing
 # [r,g,b] with [r,g,b,a] misreads the whole scale, not just the blanks.
 NO_DATA_COLOR = [0, 0, 0, 0]
 COLOR_LOW = [247, 222, 195, 255]
 COLOR_HIGH = [112, 0, 91, 255]
-LINE_COLOR = [72, 72, 72, 255]  # outlines carry the map where the fill is empty
 NO_DATA_TEXT = "\u2014"  # em-dash: no value, distinct from 0.0
 MAP_STYLE_URL = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
 LAYER_ID = "precincts"  # Layer(id=...) is required or selection state is unkeyed
@@ -387,14 +388,12 @@ def build_deck(
         id=LAYER_ID,
         get_polygon="__rings",
         get_fill_color="__color",
-        get_line_color=list(LINE_COLOR),
-        get_line_width=1.2,
-        # PolygonLayer measures line width in METERS by default, which at this
-        # zoom is well under a pixel -- and with a transparent fill the outline
-        # is the only thing marking an empty precinct.  Min-pixels clamps it in
-        # screen space.  (line_width_units is NOT set: pydeck would ship the
-        # string as `@@=pixels` and the browser would read it as a record key.)
-        line_width_min_pixels=1,
+        # deck.gl strokes polygons by DEFAULT (PolygonLayer.defaultProps sets
+        # stroked:true), so the border only goes away if this is switched off
+        # explicitly.  Booleans serialise as plain values -- not the `@@=`
+        # string trap of fc08df5.  auto_highlight stays on: with no border and
+        # no fill, it is the only hover feedback an empty precinct can give.
+        stroked=False,
         pickable=True,
         auto_highlight=True,
         extruded=False,
@@ -460,8 +459,8 @@ def main() -> None:
         field = next(f for f in CHOROPLETH_FIELDS if labels[f] == chosen)
         st.caption(
             "Hover a precinct for all five metrics; click one for its "
-            "demographics.  Outlined precincts with no fill hold no value for "
-            "the chosen metric."
+            "demographics.  Precincts with no value for the chosen metric draw "
+            "nothing, but stay hoverable and clickable."
         )
 
     st.title("Precinct choropleth")
@@ -496,7 +495,7 @@ def main() -> None:
         st.caption(
             f"{colored} of {stats['polygons']} polygons are coloured by {labels[field]}; "
             f"the remaining {stats['polygons'] - colored} carry no value for it and "
-            "are left unfilled."
+            "draw nothing."
         )
         missing = stats["unmatched"]
         if missing:
