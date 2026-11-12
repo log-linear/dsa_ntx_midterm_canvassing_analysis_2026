@@ -248,6 +248,86 @@ JOIN_NOTE = {
     "source_ref": " Joined to `census_vtd_geoid` from the precinct-to-VTD crosswalk.",
 }
 
+# ---------------------------------------------------------------------------
+# READABLE_OVERRIDES -- the single source of truth for corrected labels.
+#
+# 58 of the 89 fields inherit `label` verbatim from the read-only Dallas Fair
+# Districts export, and that export mangles them ('Pct nh white', 'Not us
+# citizen', 'Fb pct africa').  The fix belongs here, at the root, and is applied
+# *after* label selection so data/raw/ stays untouched and MANUAL stays readable
+# as authored.  It covers the whole dictionary, not just the fields the precinct
+# dashboard displays: half-fixed labels would leak into the next tool.
+#
+# Rule: title-case, and expand the source's machine-mangled abbreviations --
+#   pct -> Percent, nh -> Non-Hispanic, us -> U.S., snap -> SNAP,
+#   50k -> $50k, sq_mi -> Square Mile, bachelors_plus -> Bachelor's or Higher
+# plus ordinary acronym casing (ACS, CVAP, MOE, VTD, ID, HS) and one lowercase
+# connective where the source reads better that way ('on', 'or'), matching the
+# human's worked examples 'Percent Age 18-64' / 'Percent Households on SNAP'.
+# 'fb' is left as the source's own acronym, upper-cased, because the rule does
+# not license guessing at what it stands for.
+# ---------------------------------------------------------------------------
+READABLE_OVERRIDES = {
+    # identity / demographics inherited from the DFS export
+    "district_id": "District ID",
+    "source_ref": "Census Code",
+    "land_area_sq_m": "Land Area",
+    "acs_release": "ACS Release",
+    "acs_lines_match_current": "ACS Lines Match Current",
+    "cvap_total": "CVAP Total",
+    "cvap_total_moe": "CVAP Total MOE",
+    "fb_pct_africa": "FB Percent Africa",
+    "fb_pct_asia": "FB Percent Asia",
+    "fb_pct_europe": "FB Percent Europe",
+    "fb_pct_latin_america": "FB Percent Latin America",
+    "foreign_born": "Foreign Born",
+    "housing_units": "Housing Units",
+    "median_age": "Median Age",
+    "median_household_income": "Median Household Income",
+    "not_us_citizen": "Not U.S. Citizen",
+    # the pct_* family
+    "pct_age_18_64": "Percent Age 18\u201364",
+    "pct_age_20_39": "Percent Age 20\u201339",
+    "pct_bachelors_plus": "Percent Bachelor's or Higher",
+    "pct_below_poverty": "Percent Below Poverty",
+    "pct_english_only": "Percent English Only",
+    "pct_family_households": "Percent Family Households",
+    "pct_female": "Percent Female",
+    "pct_hispanic": "Percent Hispanic",
+    "pct_households_snap": "Percent Households on SNAP",
+    "pct_hs_or_less": "Percent HS or Less",
+    "pct_income_under_50k": "Percent Income Under $50k",
+    "pct_married_couple_households": "Percent Married Couple Households",
+    "pct_multi_unit": "Percent Multi Unit",
+    "pct_nh_asian": "Percent Non-Hispanic Asian",
+    "pct_nh_black": "Percent Non-Hispanic Black",
+    "pct_nh_other": "Percent Non-Hispanic Other",
+    "pct_nh_white": "Percent Non-Hispanic White",
+    "pct_owner_occupied": "Percent Owner Occupied",
+    "pct_single_unit": "Percent Single Unit",
+    "pct_spanish": "Percent Spanish",
+    "pct_us_born": "Percent U.S. Born",
+    "pct_vacant": "Percent Vacant",
+    "population_per_sq_mi": "Population Per Square Mile",
+    # registration / turnout
+    "registered_active": "Registered Active",
+    "registered_active_per_cvap": "Registered Active Per CVAP",
+    "registered_total": "Registered Total",
+    "registered_total_per_cvap": "Registered Total Per CVAP",
+    "voted_total": "Voted Total",
+    "voted_total_per_cvap": "Voted Total Per CVAP",
+    "voted_total_per_registered_total": "Voted Total Per Registered Total",
+    # presidential
+    "president_2020_dem_share": "2020 Democratic Share",
+    "president_2020_margin": "2020 Margin",
+    "president_2020_total_votes": "2020 Total Votes",
+    "president_2024_dem_share": "2024 Democratic Share",
+    "president_2024_margin": "2024 Margin",
+    "president_2024_total_votes": "2024 Total Votes",
+    "opportunity_sanders_avg": "Sanders Primary Share",
+    "opportunity_sanders_margin_avg": "Sanders Margin",
+}
+
 
 def classify(values):
     """Type of the non-blank values in a column (blanks are missing, not text)."""
@@ -323,7 +403,7 @@ _DESC_CACHE: "dict[str, str]" = {}
 
 
 def main():
-    with open(IN_CSV, newline="") as fh:
+    with open(IN_CSV, newline="", encoding="utf-8") as fh:
         reader = csv.DictReader(fh)
         fields = list(reader.fieldnames or [])
         columns = {f: [] for f in fields}
@@ -334,10 +414,15 @@ def main():
 
     dfs = {
         d["column"]: d
-        for d in csv.DictReader(open(DFS_DICT, newline=""))
+        for d in csv.DictReader(open(DFS_DICT, newline="", encoding="utf-8"))
     }
 
+    stale = sorted(set(READABLE_OVERRIDES) - set(fields))
+    if stale:
+        raise SystemExit(f"READABLE_OVERRIDES names fields not in precinct_data.csv: {stale}")
+
     records, gaps = [], []
+    n_overridden = 0
     for f in fields:
         _DESC_CACHE[f] = MANUAL[f][1] if f in MANUAL else (
             dfs[f]["description"] if f in dfs else ""
@@ -353,6 +438,11 @@ def main():
             label = readable_from_name(f)
             description = "Not documented -- add to MANUAL in build_data_dictionary.py."
             gaps.append(f)
+        # Applied after label selection so both the DFS-inherited labels and the
+        # hand-authored MANUAL ones can be corrected at the root, in one place.
+        if f in READABLE_OVERRIDES:
+            label = READABLE_OVERRIDES[f]
+            n_overridden += 1
         observed, note = reconcile(f, columns[f], declared)
         records.append(
             {
@@ -363,7 +453,7 @@ def main():
             }
         )
 
-    with open(OUT, "w", newline="") as fh:
+    with open(OUT, "w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(
             fh, fieldnames=["field_name", "data_type", "description", "readable_name"]
         )
@@ -380,6 +470,7 @@ def main():
     print(f"partly blank fields         : {sum(1 for r in records if 'blank for' in r['description'])}")
     print(f"blank-readable names        : "
           f"{[r['field_name'] for r in records if not r['readable_name']]}")
+    print(f"labels corrected (overrides) : {n_overridden}")
     print(f"types used                  : {sorted({r['data_type'] for r in records})}")
     print(f"wrote {OUT}")
 

@@ -3,14 +3,14 @@ title: 'Streamlit precinct choropleth dashboard'
 type: feature
 ticket: ''
 created: '2026-11-10'
-status: ready-for-dev
+status: built
 baseline_revision: '5b01f45'
 route: full
 route_source: auto
 risk: medium
-review: ''
-review_source: ''
-lenses_ran: []
+review: quick
+review_source: pinned
+lenses_ran: [quick]
 review_loop_iteration: 0
 context:
   - '{project-root}/data/precinct_data.csv'
@@ -96,11 +96,11 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `build_data_dictionary.py` -- add a readable-name override covering every mangled label (58 fields inherit them from the DFS export), then run it to regenerate `data/data_dictionary.csv` -- root fix; a display-layer patch would be clobbered by the next generation
-- [ ] `dashboard.py` -- create: pure data functions (`fetch_features`, `load_rows`, `build_dictionary`, `join_precincts`, `color_scale`, `tooltip_html`) importable without Streamlit, then the UI (sidebar `st.selectbox` of the 5 readable labels, `st.pydeck_chart`, detail view) -- keeping prep pure makes the edge matrix testable
-- [ ] `.streamlit/config.toml` -- create `[browser] gatherUsageStats = false` -- satisfies telemetry at launch rather than via an overridable runtime `set_option`
-- [ ] `pyproject.toml` -- add `streamlit>=1.67`, `pydeck`, `pandas` -- declared so `uv run` works on a fresh clone
-- [ ] `tests/test_dashboard.py` -- assert each checkable Matrix row: join cardinality 84 and `1046` absent from layer, blank≠zero, all 5 choropleth fields present in every tooltip incl. for a data-less precinct, all 17 displayed detail fields resolve to corrected labels, the 9 no-data fields are absent from the panel, `Layer(id=...)` == the selection key, regenerated labels contain no `Pct `/` nh `/` us ` artifacts -- protects semantics a choropleth gets silently wrong
+- [x] `build_data_dictionary.py` -- add a readable-name override covering every mangled label (58 fields inherit them from the DFS export), then run it to regenerate `data/data_dictionary.csv` -- root fix; a display-layer patch would be clobbered by the next generation
+- [x] `dashboard.py` -- create: pure data functions (`fetch_features`, `load_rows`, `build_dictionary`, `join_precincts`, `color_scale`, `tooltip_html`) importable without Streamlit, then the UI (sidebar `st.selectbox` of the 5 readable labels, `st.pydeck_chart`, detail view) -- keeping prep pure makes the edge matrix testable
+- [x] `.streamlit/config.toml` -- create `[browser] gatherUsageStats = false` -- satisfies telemetry at launch rather than via an overridable runtime `set_option`
+- [x] `pyproject.toml` -- add `streamlit>=1.67`, `pydeck`, `pandas` -- declared so `uv run` works on a fresh clone
+- [x] `tests/test_dashboard.py` -- assert each checkable Matrix row: join cardinality 84 and `1046` absent from layer, blank≠zero, all 5 choropleth fields present in every tooltip incl. for a data-less precinct, all 17 displayed detail fields resolve to corrected labels, the 9 no-data fields are absent from the panel, `Layer(id=...)` == the selection key, regenerated labels contain no `Pct `/` nh `/` us ` artifacts -- protects semantics a choropleth gets silently wrong
 
 **Acceptance Criteria:**
 - Given a fresh `uv run streamlit run dashboard.py`, when the map renders, then all 791 polygons are drawn over a basemap, exactly 84 carry CSV data, and color is `prop_a_city_no_canvassing_pct`.
@@ -112,9 +112,41 @@ context:
 
 ## Implementation Notes
 
+- `dashboard.py` splits a pure data layer (`fetch_features`, `load_rows`, `build_dictionary`, `label_for`, `to_float`, `format_value`, `domain_for`, `color_scale`, `tooltip_html`, `join_index`, `join_precincts`, `layer_keys`, `detail_panel_fields`, `bbox`, `decorate`, `detail_records`, `build_deck`, `selected_props`) from the Streamlit UI. Streamlit resolves lazily at the bottom of the module and `main()` runs only under `__main__`, so `import dashboard` works with no run context.
+- `detail_panel_fields()` decides Decision 1c from the data (drop fields blank in *every* row) rather than hard-coding the 17, so a field that later gains values appears without an edit. `NO_DATA_FIELDS` is asserted against it, keeping the frozen row checkable.
+- `build_data_dictionary.py` gained `READABLE_OVERRIDES` (54 entries), applied *after* label selection so it corrects DFS-inherited and `MANUAL` labels alike, plus a guard raising on an override naming a field no longer in the CSV (Decision 2b). `data/raw/` stays read-only.
+- Grey outlines (`LINE_COLOR`, opaque) keep precincts legible if MapLibre tiles never load — the offline-basemap path in Design Notes.
+- Left for the human (no browser in this environment): the plan's `## Verification` manual checks — hover coloured vs grey, click then click-a-second (no stacking), toggle all five fields, basemap legibility without tiles.
+
 ## Plan Change Log
 
+- 2026-11-11 (implement): corrected `## Verification` boot command `localhost:8501/healthz` → `localhost:8501/_stcore/health`. `/healthz` serves the SPA HTML shell in streamlit 1.67; `/_stcore/health` returns `ok`. Verified both. No intent change.
+- 2026-11-11 (implement): Code Map per-field populated counts confirmed as written (24/63/63/84/25) by live measurement; an interim report of "64/64/85" was a mis-measurement and is not a plan error. Join cardinality is 84 of 85 with `1046` excluded, as the matrix states.
+- 2026-11-11 (implement): the first draft of `tests/test_dashboard.py` encoded matrix row "Precinct in CSV, absent from layer" backwards (asserted `1046` absent from the CSV index). Fixed the test to the frozen row — absent from the *layer*, present in the CSV. Never edited a matrix expectation to match code.
+- 2026-11-11 (implement): matrix rows that only hold at render time (default-load coverage, no-selection prompt, click, layer-unreachable) were initially guarded by `hasattr`/`try` skips, which the matrix audit counts as missing coverage. Rewritten to drive `main()` through `streamlit.testing.v1.AppTest` so every row asserts on emitted widgets; `SKIP` lines are now zero.
+
 ## Review Triage Log
+
+Quick lens (2026-11-11), 16 findings, each verified at the cited location before verdict. No `intent_gap` / `bad_plan` survivor, so no loopback. Grouped: **A** = findings 1-3, **B** = 4-5, **C** = 9, **D** = 14-15, **E** = 10.
+
+| # | Finding (location) | Verdict | Evidence & route |
+|---|---|---|---|
+| 1 | `dashboard.py:460` `selected_props(chart.selection)` never resolves a click | **high** | Reproduced: a real `PydeckState` with a populated selection returns the dict when passed whole and `None` when passed as `.selection`, because `PydeckSelectionState` has no `selection` key and `getattr(..., None)` swallows the `AttributeError`. Unmet AC "Given a polygon click…". **patch → applied**; suite mutation-checked (reintroducing it fails at `tests/test_dashboard.py:389`). |
+| 2 | `tests` `_State` double nesting documented the mock, not the chart contract | **high** | Same root cause as 1: the hand-rolled `self.selection = _Sel(objects)` is a shape `main()` never produces. **patch → applied**; replaced with Streamlit's real `PydeckState`/`PydeckSelectionState`. |
+| 3 | `run_app` stubbed `selected_props`, so the click rows could not fail | **medium** | Confirmed: `AppTest.from_string` reuses the module in `sys.modules`, so the patch bypassed the broken extractor. **patch → applied**; now patches `st.pydeck_chart` to return a real state and lets the actual call site run. |
+| 4 | `tests:269` `'"map_provider": "mapbox"' not in dj` can never fail | **medium** | Confirmed by measurement: the deck JSON emits `mapProvider`/`mapStyle` and no `map_provider`, and `blob.get("map")` is `{}`. **patch → applied**; asserts `blob["mapProvider"] == "maplibre"` and `blob["mapStyle"] == MAP_STYLE_URL`. |
+| 5 | Dead `20261108` disjunct + unused `texts` lambda | **low** | `dashboard.py` puts no source path in any caption, so the branch never fired; the lambda was unreferenced. **patch → applied**; replaced with a positive "no path leaked" assertion. |
+| 6 | `format_value` guesses % from magnitude; non-% branch prints `4.5e+04` | **low** (rejected) | The branch is real (`f"{45000:,.4g}"` → `4.5e+04`) but unreachable: measured, **no** displayed field carries a value outside [0,1] — the fields that would break are exactly the 9 omitted by Decision 1c. Unlikely to be met in everyday use and a fix adds per-field unit branches. Rejected; flagged to the human as a latent risk if the extract later populates a non-fraction field. |
+| 7 | Colour domain includes the excluded `1046` row | **false** (rejected) | Measured `domain_for` over all 85 rows vs the 84 drawable: **identical for all five fields** (0.0–0.179856 / 0.3019–0.834 / 0.3327–0.7145 / 0.5087–0.8539 / 0.0–0.4). The claim does not occur. |
+| 8 | Offline branch renders a table, violating "No selection yet" | **false** (rejected) | The frozen row's expected behavior is "no **empty** table"; the offline path renders a *populated* 17-metric panel behind an explicit precinct selectbox, and the adjacent row requires "joined-field UI still renders" offline. Refuted by the test's own shape assertions. |
+| 9 | Generator `open()` without `encoding` now writes non-ASCII | **medium** | Verified baseline `data_dictionary.csv` held **zero** non-ASCII chars; the en dash in `Percent Age 18–64` is new to this change, so `LC_ALL=C` would raise `UnicodeEncodeError` and cp1252 would write mojibake — breaking the byte-stability AC. **patch → applied**; regenerated byte-identical (md5 `749febbc…`) under default, `LC_ALL=C` and `C.UTF-8`. |
+| 10 | `pyproject.toml` deps without an `uv.lock` hunk — diff not self-contained | **medium** | `git show 5b01f45:uv.lock` has 0 streamlit/pydeck/pandas entries while the worktree has 11. **patch → applied**; `{diff_file}` re-staged to include `uv.lock`. |
+| 11 | `tooltip_html` interpolates `NewPrcnt` unescaped into tooltip HTML | **low** (rejected) | Design Notes do say "never pass a source string through unformatted", but all 791 layer values are alphanumeric (15 like `30A4`, 0 HTML metacharacters), so the bad outcome needs a hostile layer. Fix adds escaping complexity for a closed value space. Rejected; disclosed to the human. |
+| 12 | `join_index` trusts "fan-out resolved at source" rather than enforcing it | **false** (rejected) | A frozen Decision explicitly waives a row-picking rule, and `tests` asserts 85 rows → 85 unique non-blank keys, so regressed fan-out fails the suite rather than silently captioning wrong. |
+| 13 | Per-rerun `deepcopy` of 791 features + full `bbox` rescan | **low** (rejected) | Measured 221 ms + 36 ms per rerun. The `deepcopy` is load-bearing: without it `decorate` would mutate the object `st.cache_data` hands back and poison later reruns. Caching it adds invalidation state not demonstrated as a problem. |
+| 14 | Override coverage rests on inspection; artifact list is substring-brittle | **medium** | Real silent-regress risk: computed, only 35 of the 54 corrections were protected by artifact substrings or worked examples — **26 would regress unnoticed** (e.g. `Median age` → `Median Age`), against Decision 2b. **patch → applied** (finding 15's check subsumes the substring scan). |
+| 15 | `n_overridden` printed but never asserted against the generated file | **medium** | Same root cause as 14; no check tied the override dict to the CSV. **patch → applied**; `tests` now asserts every `READABLE_OVERRIDES` entry equals the emitted `readable_name` (54/54). |
+| 16 | `declared = observed` before assignment in the undocumented-field branch | **defer** | Line is byte-identical at baseline (`git show 5b01f45:build_data_dictionary.py` → line 352), so it is pre-existing and outside this change's "label fix only" boundary. Recorded in `_bmad-output/deferred-work.md`. |
 
 ## Design Notes
 
@@ -137,7 +169,7 @@ Keep the choropleth readable without the basemap: precincts must stay distinguis
 - `uv run python build_data_dictionary.py` -- expected: `rows in precinct_data.csv: 85`, `UNDOCUMENTED (fallback): []`, `blank-readable names: []`
 - `uv run python tests/test_dashboard.py` -- expected: exits 0 with a pass line per assertion
 - `uv run python -c "import dashboard; print(len(dashboard.load_rows()), len(dashboard.build_dictionary()))"` -- expected: `85 89`
-- `uv run streamlit run dashboard.py --server.headless true & sleep 8; curl -s localhost:8501/healthz` -- expected: `ok`, no traceback on stderr
+- `uv run streamlit run dashboard.py --server.headless true & sleep 12; curl -s localhost:8501/_stcore/health` -- expected: `ok`, no traceback on stderr (`/healthz` serves the SPA HTML shell; `/_stcore/health` is the health endpoint in streamlit 1.67)
 - `uv run python -c "from streamlit import config; print(config.get_option('browser.gatherUsageStats'))"` -- expected: `False`
 
 **Manual checks:**

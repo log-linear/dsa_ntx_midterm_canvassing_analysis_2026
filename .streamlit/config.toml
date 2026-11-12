@@ -1,0 +1,4 @@
+# Committed so telemetry is off at launch, not via an overridable runtime
+# set_option.  Verified with: streamlit config show  ->  gatherUsageStats = false
+[browser]
+gatherUsageStats = false
