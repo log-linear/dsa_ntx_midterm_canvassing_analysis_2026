@@ -25,9 +25,9 @@ def ok(name: str, detail: str = "") -> None:
     print(f"PASS  {name}{('  [' + detail + ']') if detail else ''}")
 
 
-def is_opaque(color: list[int]) -> bool:
-    """A fill the viewer can actually see: an explicit alpha of 255."""
-    return len(color) == 4 and color[3] == 255
+def is_painted(color: list[int]) -> bool:
+    """Does this fill put pixels on the screen?  Any alpha above 0, any colour."""
+    return len(color) == 4 and color[3] > 0
 
 
 def grammar_ok(expr: str, where: str) -> None:
@@ -146,10 +146,28 @@ colored = dashboard.color_scale(0.0, domain)
 empty = dashboard.color_scale(None, domain)
 assert empty == dashboard.NO_DATA_COLOR == [0, 0, 0, 0], empty
 assert empty[3] == 0, "no-data fill must be transparent"
-assert colored != empty and colored == dashboard.COLOR_LOW, (colored, empty)
+assert colored != empty and colored[:3] == dashboard.COLOR_LOW, (colored, empty)
 assert len(colored) == len(empty) == 4, (colored, empty)
-assert is_opaque(colored), f"a data-bearing fill went see-through: {colored}"
+assert is_painted(colored), f"a data-bearing fill went invisible: {colored}"
 ok("0.0000 colours at the scale minimum; blank is transparent", f"domain {domain}")
+
+# FILL_ALPHA is the single opacity knob: it reaches every colour in the ramp and
+# nothing else can override it.  Under 255 by design, so the basemap stays
+# legible beneath the choropleth -- set it to 255 (and update this check) only if
+# a solid map is deliberately wanted.
+assert 0 < dashboard.FILL_ALPHA < 255, dashboard.FILL_ALPHA
+assert {dashboard.color_scale(v, domain)[3] for v in (0.0, 0.5, 1.0)} == {
+    dashboard.FILL_ALPHA
+}, [dashboard.color_scale(v, domain) for v in (0.0, 0.5, 1.0)]
+ok("FILL_ALPHA is the one opacity knob and lands on every ramp colour", str(dashboard.FILL_ALPHA))
+
+# The ramp is plain RGB so opacity cannot be baked into one endpoint only: a
+# mismatch would truncate zip() and strip the alpha from the whole scale.
+assert len(dashboard.COLOR_LOW) == len(dashboard.COLOR_HIGH) == 3, (
+    dashboard.COLOR_LOW,
+    dashboard.COLOR_HIGH,
+)
+ok("ramp endpoints are plain RGB; FILL_ALPHA is the only source of opacity")
 
 # Borders are gone, so a no-data precinct now paints literally nothing.  What
 # still has to hold is that those invisible polygons are pickable (the fill
@@ -157,7 +175,8 @@ ok("0.0000 colours at the scale minimum; blank is transparent", f"domain {domain
 # behind as a second source of truth.
 assert not hasattr(dashboard, "LINE_COLOR"), "LINE_COLOR outlived the borders"
 assert dashboard.NO_DATA_COLOR == [0, 0, 0, 0], dashboard.NO_DATA_COLOR
-ok("no-data precincts are fully empty: transparent fill, no border constant left")
+ok("no-data precincts stay fully empty regardless of FILL_ALPHA: no fill, no border")
+assert dashboard.color_scale(None, domain) == [0, 0, 0, 0], "no-data must not inherit FILL_ALPHA"
 
 # per-field normalization, never a fixed 0-1
 kamala = dashboard.domain_for([dashboard.to_float(r.get("2024_kamala")) for r in rows])
@@ -279,15 +298,17 @@ for field in dashboard.CHOROPLETH_FIELDS:
 
     # The empty style tracks the *value*, not the join: a precinct present in the
     # CSV but blank for the selected field is exactly as unfilled as one absent
-    # from it, and only a real number earns an opaque fill.
+    # from it, and only a real number earns a fill at all.
     for record in live:
         row = index.get(str(record[dashboard.JOIN_LAYER_KEY]).strip())
         valued = row is not None and dashboard.to_float(row.get(field)) is not None
-        assert is_opaque(record["__color"]) == valued, (
+        assert is_painted(record["__color"]) == valued, (
             f"{field}: precinct {record[dashboard.JOIN_LAYER_KEY]} filled "
             f"{record['__color']} but valued={valued}"
         )
-ok("per-record __color: opaque where data exists, transparent where not", str(populated))
+        if valued:
+            assert record["__color"][3] == dashboard.FILL_ALPHA, record["__color"]
+ok("per-record __color: painted where data exists, empty where not", str(populated))
 distinct = {
     tuple(r["__color"])
     for r in dashboard.decorate(features, rows, "2024_kamala")

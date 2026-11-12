@@ -105,12 +105,32 @@ NO_DATA_FIELDS = [
 # rasterises the FILL sublayer -- whose shader writes the picking colour -- and
 # that sublayer does not depend on `stroked`; the picking pass renders to an FBO
 # without blending and discards on the picking-validity flag, never on alpha.
-# Every fill carries an explicit alpha.  deck.gl takes the colour attribute's
-# item size from the FIRST record and applies it to all of them, so mixing
-# [r,g,b] with [r,g,b,a] misreads the whole scale, not just the blanks.
 NO_DATA_COLOR = [0, 0, 0, 0]
+
+# ---------------------------------------------------------------------------
+# FILL_ALPHA -- the one knob for how solid a data-bearing precinct paints.
+#
+# It is the alpha channel appended to every ramp colour, 0 (invisible) through
+# 255 (opaque).  Anything under 255 lets the MapLibre basemap show through the
+# choropleth.  Lower it to read street names under dense precincts; raise it to
+# 255 for a solid, poster-like map.
+#
+# It lives HERE, not inside COLOR_LOW/COLOR_HIGH, on purpose: `color_scale`
+# interpolates the two endpoints with zip(), which silently truncates to the
+# shorter list, so an alpha baked into one endpoint but not the other drops the
+# alpha channel from the entire scale -- and deck.gl sizes the colour attribute
+# from the first record it sees, so a ragged mix misreads every polygon.
+# ---------------------------------------------------------------------------
+FILL_ALPHA = 200
+
+# The ramp, authored as plain RGB.  See the guard below.
 COLOR_LOW = [251, 210, 212]
-COLOR_HIGH = [236, 31, 39, 255]
+COLOR_HIGH = [236, 31, 39]
+
+assert len(COLOR_LOW) == len(COLOR_HIGH) == 3, (
+    "COLOR_LOW/COLOR_HIGH must be plain RGB (r, g, b): opacity is FILL_ALPHA's "
+    "job, and mismatched lengths truncate the whole scale via zip()"
+)
 NO_DATA_TEXT = "\u2014"  # em-dash: no value, distinct from 0.0
 MAP_STYLE_URL = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
 LAYER_ID = "precincts"  # Layer(id=...) is required or selection state is unkeyed
@@ -210,17 +230,20 @@ def domain_for(values: list[float | None]) -> tuple[float, float] | None:
 
 
 def color_scale(value: float | None, domain: tuple[float, float] | None) -> list[int]:
-    """Two-colour interpolation across `domain`; blank -> transparent "no data".
+    """The fill for one value: the ramp at `FILL_ALPHA`, or nothing at all.
 
     A real 0.0 with a populated domain lands on the scale minimum, not the empty
     style: blank and zero are different states, and only blank drops the fill.
+    Alpha is appended rather than interpolated, so every painted fill shares one
+    opacity and one length -- change `FILL_ALPHA`, not these colours.
     """
     if value is None or domain is None:
         return list(NO_DATA_COLOR)
     lo, hi = domain
     t = 0.0 if hi == lo else (value - lo) / (hi - lo)
     t = max(0.0, min(1.0, t))
-    return [round(a + (b - a) * t) for a, b in zip(COLOR_LOW, COLOR_HIGH)]
+    rgb = [round(a + (b - a) * t) for a, b in zip(COLOR_LOW, COLOR_HIGH)]
+    return rgb + [FILL_ALPHA]
 
 
 def _js_literal(text: str) -> str:
