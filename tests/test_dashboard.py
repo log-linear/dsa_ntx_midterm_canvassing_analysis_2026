@@ -215,18 +215,20 @@ assert "pct_nope" in str(err), err
 ok("missing dictionary entry fails fast naming the field")
 
 # --- tooltip: all five metrics, always ------------------------------------
-template = dashboard.tooltip_expression(dictionary)
-grammar_ok(template, "tooltip")
-refs = re.findall(r"\b(v_\w+)\b", template)
-assert refs == ["v_" + f for f in dashboard.CHOROPLETH_FIELDS], refs
-assert re.search(r"\b" + dashboard.JOIN_LAYER_KEY + r"\b", template), template
-visible = re.sub(r'"(?:[^"\\]|\\.)*"', "", template)
-visible = re.sub(r"'(?:[^'\\]|\\.)*'", "", visible)
-visible = re.sub(r"\bv_\w+\b", "", visible)
+# This one is a `{token}` template, the grammar Streamlit's OWN tooltip channel
+# uses -- deliberately not the `@@=` expression grammar the layer props need.
+# `\n` is fine here because the frontend assigns the text via innerText.
+template = dashboard.tooltip_template(dictionary)
+tokens = re.findall(r"\{([^{}]+)\}", template)
+assert tokens == [dashboard.JOIN_LAYER_KEY] + [
+    "v_" + f for f in dashboard.CHOROPLETH_FIELDS
+], tokens
+body = re.sub(r"\{[^{}]+\}", "", template)
 for field in dashboard.CHOROPLETH_FIELDS:
     assert dashboard.label_for(dictionary, field) in template, field
-    assert field not in visible, f"raw field name visible in tooltip: {field}"
-ok("tooltip expression carries all five labels and five value slots")
+    assert field not in body, f"raw field name visible in tooltip: {field}"
+assert template.count("\n") == len(dashboard.CHOROPLETH_FIELDS), template
+ok("tooltip template carries the precinct id plus all five labelled slots")
 
 fc = dashboard.decorate(
     [{"properties": {dashboard.JOIN_LAYER_KEY: key}} for key in ["1046", "999999"]],
@@ -346,6 +348,17 @@ assert emitted["getPolygon"] == "@@=__rings", emitted["getPolygon"]
 # ships as a plain boolean false -- a string would be marked `@@=` and read as a
 # record lookup.  No line-styling prop should survive the removal at all.
 assert emitted["stroked"] is False, emitted.get("stroked")
+# The tooltip has to reach Streamlit's proto field, which is the ONLY place
+# st.pydeck_chart looks.  Asserting the template string exists somewhere in the
+# spec was never enough -- it did, and hover still showed nothing.
+from streamlit.elements.deck_gl_json_chart import _get_pydeck_tooltip
+
+shipped = _get_pydeck_tooltip(deck)
+assert isinstance(shipped, dict), f"tooltip never reaches Streamlit: {shipped!r}"
+assert shipped.get("text") == template, shipped
+assert "html" not in shipped, "html is assigned via innerHTML; text is not"
+assert "tooltip" not in emitted, "the inert layer-level tooltip prop is back"
+ok("tooltip ships on Streamlit's own channel, not as a deck.gl layer prop")
 leftover = sorted(k for k in emitted if "line" in k.lower())
 assert not leftover, f"border props survived the removal: {leftover}"
 ok("stroked serialises as boolean false and no line props remain")
@@ -476,7 +489,7 @@ same = all(
     if k.startswith("v_") or k == "__matched"
 )
 assert same, "tooltip values changed when the colour field changed"
-assert dashboard.tooltip_expression(dictionary) == template, "tooltip is field-dependent"
+assert dashboard.tooltip_template(dictionary) == template, "tooltip is field-dependent"
 ok("switching field re-scales colour and leaves all five tooltip metrics unchanged")
 
 # Click a polygon whose precinct is in the CSV: 17 labeled metrics, no raw names.

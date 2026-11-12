@@ -7,7 +7,7 @@ demographic detail panel.  Every metric is labelled with its `readable_name`
 from data/data_dictionary.csv -- never the raw field name.
 
 The data layer (`fetch_features`, `load_rows`, `build_dictionary`,
-`join_precincts`, `color_scale`, `tooltip_expression`) is pure and importable
+`join_precincts`, `color_scale`, `tooltip_template`) is pure and importable
 without a Streamlit run context, which is what makes the plan's edge-case matrix
 testable in tests/test_dashboard.py.
 
@@ -208,7 +208,7 @@ def format_value(value: float | None) -> str:
     """Format a parsed number for display.
 
     Called only on floats that `to_float` produced (or None), so no source
-    string ever reaches the tooltip HTML unformatted.
+    string ever reaches the tooltip unformatted.
     """
     if value is None:
         return NO_DATA_TEXT
@@ -246,28 +246,22 @@ def color_scale(value: float | None, domain: tuple[float, float] | None) -> list
     return rgb + [FILL_ALPHA]
 
 
-def _js_literal(text: str) -> str:
-    """`text` as a double-quoted literal for the @deck.gl/json expression grammar."""
-    escaped = str(text).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
-    return '"' + escaped + '"'
-
-
-def tooltip_expression(
+def tooltip_template(
     dictionary: dict[str, dict[str, str]], prefix: str = "v_"
 ) -> str:
-    """The hover tooltip as a @deck.gl/json *expression*, not HTML or JS.
+    """The hover tooltip as a `{token}` template, one line per metric.
 
-    pydeck marks every string layer prop with `@@=`, and the browser parses what
-    follows with the JSON-expression grammar: key lookups, literals, `+` and
-    ternary -- no arrow functions, no `{token}` templates.  The returned string
-    goes into the tooltip's innerText, so labels are concatenated in Python and
-    only the per-precinct values are looked up at hover time.
+    A DIFFERENT mechanism from the `@@=` layer props: st.pydeck_chart has no
+    tooltip argument and ignores deck.gl's layer-level `tooltip`, so this text
+    travels in its own protobuf field (see `build_deck`) and the frontend swaps
+    every `{token}` for the picked record's value.  Tokens therefore have to name
+    keys `decorate` actually writes.  The result lands in the tooltip element's
+    innerText, so `\\n` breaks a line and no markup is involved.
     """
-    lines = [_js_literal("Precinct ") + " + " + JOIN_LAYER_KEY]
+    lines = [f"Precinct {{{JOIN_LAYER_KEY}}}"]
     for field in CHOROPLETH_FIELDS:
-        label = label_for(dictionary, field) + ": "
-        lines.append(_js_literal(label) + " + " + prefix + field)
-    return r" + '\n' + ".join(lines)
+        lines.append(f"{label_for(dictionary, field)}: {{{prefix}{field}}}")
+    return "\n".join(lines)
 
 
 def join_index(rows: list[dict[str, str]]) -> dict[str, dict[str, str]]:
@@ -403,6 +397,13 @@ def build_deck(
 
     `map_provider="maplibre"` with a style *URL string*; a dict style would make
     Streamlit demand mapbox.  The layer id is what the selection state keys on.
+
+    The tooltip goes on the DECK, never the layer.  st.pydeck_chart takes no
+    tooltip argument: it lifts `Deck(tooltip=dict)` into its own protobuf field
+    and hands deck.gl a `getTooltip` of its own, which overrides the layer prop
+    deck.gl would otherwise use.  A layer-level `tooltip` string therefore
+    serialises into the spec, is never read, and the map looks perfect while no
+    tooltip ever appears on hover -- the bug this comment exists to prevent.
     """
     pdk = _pydeck()
     layer = pdk.Layer(
@@ -420,13 +421,17 @@ def build_deck(
         pickable=True,
         auto_highlight=True,
         extruded=False,
-        tooltip=tooltip,
     )
     return pdk.Deck(
         layers=[layer],
         initial_view_state=_view_state(features),
         map_provider="maplibre",
         map_style=MAP_STYLE_URL,
+        # `text`, not `html`: the frontend assigns `text` through innerText, so
+        # precinct ids and labels arriving from the live layer cannot inject
+        # markup.  Must be a dict -- pydeck defaults this to True, and Streamlit
+        # only ships the tooltip when it is a dict.
+        tooltip={"text": tooltip},
     )
 
 
@@ -468,7 +473,7 @@ def main() -> None:
     dictionary = build_dictionary()
     # Fail fast, before anything renders, if the dictionary cannot name a field.
     labels = {f: label_for(dictionary, f) for f in CHOROPLETH_FIELDS + DETAIL_FIELDS}
-    tooltip = tooltip_expression(dictionary)
+    tooltip = tooltip_template(dictionary)
     panel_fields = detail_panel_fields(rows)
     index = join_index(rows)
 
