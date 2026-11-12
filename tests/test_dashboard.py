@@ -25,6 +25,11 @@ def ok(name: str, detail: str = "") -> None:
     print(f"PASS  {name}{('  [' + detail + ']') if detail else ''}")
 
 
+def is_opaque(color: list[int]) -> bool:
+    """A fill the viewer can actually see: an explicit alpha of 255."""
+    return len(color) == 4 and color[3] == 255
+
+
 def grammar_ok(expr: str, where: str) -> None:
     """Reject what @deck.gl/json cannot parse: no JS, no {token} templates.
 
@@ -133,15 +138,23 @@ assert dashboard.format_value(0.0) == "0.0%"
 assert dashboard.format_value(None) != dashboard.format_value(0.0)
 ok("blank and zero render differently")
 
-# a real 0.0 must take the scale minimum, not the no-data grey
+# a real 0.0 must take the scale minimum, not the empty no-data style
 zero_field = "prop_a_city_no_canvassing_pct"
 domain = dashboard.domain_for([dashboard.to_float(r.get(zero_field)) for r in rows])
 assert domain and domain[0] == 0.0, domain
 colored = dashboard.color_scale(0.0, domain)
-grey = dashboard.color_scale(None, domain)
-assert grey == dashboard.GREY == [200, 200, 200], grey
-assert colored != grey and colored == dashboard.COLOR_LOW, (colored, grey)
-ok("0.0000 colours at the scale minimum; blank is grey", f"domain {domain}")
+empty = dashboard.color_scale(None, domain)
+assert empty == dashboard.NO_DATA_COLOR == [0, 0, 0, 0], empty
+assert empty[3] == 0, "no-data fill must be transparent"
+assert colored != empty and colored == dashboard.COLOR_LOW, (colored, empty)
+assert len(colored) == len(empty) == 4, (colored, empty)
+assert is_opaque(colored), f"a data-bearing fill went see-through: {colored}"
+ok("0.0000 colours at the scale minimum; blank is transparent", f"domain {domain}")
+
+# Transparency is only safe because the outline stays opaque: it keeps all 791
+# precinct boundaries drawn, so an empty precinct is still visible and pickable.
+assert len(dashboard.LINE_COLOR) == 4 and dashboard.LINE_COLOR[3] == 255, dashboard.LINE_COLOR
+ok("precinct outlines stay opaque while no-data fill is transparent")
 
 # per-field normalization, never a fixed 0-1
 kamala = dashboard.domain_for([dashboard.to_float(r.get("2024_kamala")) for r in rows])
@@ -205,7 +218,7 @@ for props in (with_data, without_data):
 assert sum(1 for k in with_data if k.startswith("v_")) == 5
 # a polygon whose precinct is in the CSV: unmatched polygons get em-dashes, not gaps
 assert without_data["__matched"] is False
-assert without_data["__color"] == dashboard.GREY
+assert without_data["__color"] == dashboard.NO_DATA_COLOR
 for field in dashboard.CHOROPLETH_FIELDS:
     assert without_data["v_" + field] == dashboard.NO_DATA_TEXT, field
 ok("a data-less precinct still lists all five labels, each as an em-dash")
@@ -254,10 +267,24 @@ for field in dashboard.CHOROPLETH_FIELDS:
     ]
     populated[field] = sum(1 for v in vals if v != dashboard.NO_DATA_TEXT)
     assert isinstance(live, list) and len(live) == 791, len(live)
-    assert all(
-        isinstance(r["__color"], list) and len(r["__color"]) == 3 for r in live
-    )
-ok("per-feature __color injected into properties (not a fixed colour)", str(populated))
+    # deck.gl takes the colour attribute's item size from the first record and
+    # applies it to all of them: a ragged mix of [r,g,b] and [r,g,b,a] silently
+    # misreads the entire scale, so every fill must be RGBA.
+    assert {len(r["__color"]) for r in live} == {4}, {
+        len(r["__color"]) for r in live
+    }
+
+    # The empty style tracks the *value*, not the join: a precinct present in the
+    # CSV but blank for the selected field is exactly as unfilled as one absent
+    # from it, and only a real number earns an opaque fill.
+    for record in live:
+        row = index.get(str(record[dashboard.JOIN_LAYER_KEY]).strip())
+        valued = row is not None and dashboard.to_float(row.get(field)) is not None
+        assert is_opaque(record["__color"]) == valued, (
+            f"{field}: precinct {record[dashboard.JOIN_LAYER_KEY]} filled "
+            f"{record['__color']} but valued={valued}"
+        )
+ok("per-record __color: opaque where data exists, transparent where not", str(populated))
 distinct = {
     tuple(r["__color"])
     for r in dashboard.decorate(features, rows, "2024_kamala")
@@ -291,6 +318,11 @@ for prop, value in emitted.items():
         grammar_ok(value[3:], prop)
 assert emitted["getFillColor"] == "@@=__color", emitted["getFillColor"]
 assert emitted["getPolygon"] == "@@=__rings", emitted["getPolygon"]
+# Numeric props pass through untouched; a string one would be marked `@@=` and
+# read as a record key, so the outline clamp must arrive as a plain number.
+assert emitted["lineWidthMinPixels"] == 1, emitted.get("lineWidthMinPixels")
+assert "lineWidthUnits" not in emitted, "a string unit would ship as @@=pixels and read as a record key"
+ok("line-width clamp serialises as a number, not an @@= string")
 assert "=>" not in dj, "an arrow function reached the serialised deck"
 record_keys = set(dashboard.decorate(features, rows, "2024_kamala")[0])
 needed = ({dashboard.JOIN_LAYER_KEY, "__color", "__rings"}
@@ -400,9 +432,9 @@ ok("no selection -> prompt to click, no empty table")
 decorated = dashboard.decorate(features, rows, dashboard.DEFAULT_CHOROPLETH)
 bare = [r for r in decorated if not r["__matched"]]
 assert len(bare) == 791 - 84, len(bare)
-assert all(r["__color"] == dashboard.GREY for r in bare)
+assert all(r["__color"] == dashboard.NO_DATA_COLOR for r in bare)
 assert all(r["v_" + fld] == dashboard.NO_DATA_TEXT for r in bare for fld in dashboard.CHOROPLETH_FIELDS)
-ok("a precinct with no CSV row is grey and lists all five metrics as em-dashes", f"{len(bare)} of 791")
+ok("a precinct with no CSV row is unfilled and lists all five metrics as em-dashes", f"{len(bare)} of 791")
 
 # Switch field: colours re-scale to that field's range; tooltip values do not move.
 kamala = dashboard.label_for(dictionary, "2024_kamala")

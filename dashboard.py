@@ -99,11 +99,17 @@ NO_DATA_FIELDS = [
     "population_per_sq_mi",
 ]
 
-# no-data is a first-class style, not an absence of style
-GREY = [200, 200, 200]
-COLOR_LOW = [247, 222, 195]
-COLOR_HIGH = [112, 0, 91]
-LINE_COLOR = [72, 72, 72, 255]  # outlines keep precincts legible if tiles fail
+# No data is transparent fill, not a grey wash.  The opaque outline still draws
+# every precinct boundary, so an empty precinct stays visible, hoverable and
+# clickable -- deck.gl's picking pass discards on the picking-validity flag, not
+# on getFillColor's alpha, and renders to an FBO without blending.
+# Every fill carries an explicit alpha.  deck.gl takes the colour attribute's
+# item size from the FIRST record and applies it to all of them, so mixing
+# [r,g,b] with [r,g,b,a] misreads the whole scale, not just the blanks.
+NO_DATA_COLOR = [0, 0, 0, 0]
+COLOR_LOW = [247, 222, 195, 255]
+COLOR_HIGH = [112, 0, 91, 255]
+LINE_COLOR = [72, 72, 72, 255]  # outlines carry the map where the fill is empty
 NO_DATA_TEXT = "\u2014"  # em-dash: no value, distinct from 0.0
 MAP_STYLE_URL = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
 LAYER_ID = "precincts"  # Layer(id=...) is required or selection state is unkeyed
@@ -203,13 +209,13 @@ def domain_for(values: list[float | None]) -> tuple[float, float] | None:
 
 
 def color_scale(value: float | None, domain: tuple[float, float] | None) -> list[int]:
-    """Two-colour interpolation across `domain`; blank -> grey "no data".
+    """Two-colour interpolation across `domain`; blank -> transparent "no data".
 
-    A real 0.0 with a populated domain lands on the scale minimum, not grey:
-    blank and zero are different states.
+    A real 0.0 with a populated domain lands on the scale minimum, not the empty
+    style: blank and zero are different states, and only blank drops the fill.
     """
     if value is None or domain is None:
-        return list(GREY)
+        return list(NO_DATA_COLOR)
     lo, hi = domain
     t = 0.0 if hi == lo else (value - lo) / (hi - lo)
     t = max(0.0, min(1.0, t))
@@ -383,6 +389,12 @@ def build_deck(
         get_fill_color="__color",
         get_line_color=list(LINE_COLOR),
         get_line_width=1.2,
+        # PolygonLayer measures line width in METERS by default, which at this
+        # zoom is well under a pixel -- and with a transparent fill the outline
+        # is the only thing marking an empty precinct.  Min-pixels clamps it in
+        # screen space.  (line_width_units is NOT set: pydeck would ship the
+        # string as `@@=pixels` and the browser would read it as a record key.)
+        line_width_min_pixels=1,
         pickable=True,
         auto_highlight=True,
         extruded=False,
@@ -448,7 +460,8 @@ def main() -> None:
         field = next(f for f in CHOROPLETH_FIELDS if labels[f] == chosen)
         st.caption(
             "Hover a precinct for all five metrics; click one for its "
-            "demographics.  Grey polygons hold no value for the chosen metric."
+            "demographics.  Outlined precincts with no fill hold no value for "
+            "the chosen metric."
         )
 
     st.title("Precinct choropleth")
@@ -467,7 +480,7 @@ def main() -> None:
 
     fc = decorate(features, rows, field)
     stats = join_precincts(features, rows)
-    colored = sum(1 for record in fc if record["__color"] != GREY)
+    colored = sum(1 for record in fc if record["__color"] != NO_DATA_COLOR)
 
     chart = st.pydeck_chart(
         build_deck(fc, tooltip, features),
@@ -482,8 +495,8 @@ def main() -> None:
     with left:
         st.caption(
             f"{colored} of {stats['polygons']} polygons are coloured by {labels[field]}; "
-            f"the remaining {stats['polygons'] - colored} carry no value for it and are "
-            "drawn grey."
+            f"the remaining {stats['polygons'] - colored} carry no value for it and "
+            "are left unfilled."
         )
         missing = stats["unmatched"]
         if missing:

@@ -62,10 +62,10 @@ context:
 
 | Scenario | Input / State | Expected Output / Behavior | Error Handling |
 |----------|--------------|---------------------------|----------------|
-| Default load | App start, no interaction | Choropleth colored by `prop_a_city_no_canvassing_pct`; 24 of 791 polygons colored, rest grey; coverage stated in a caption | — |
+| Default load | App start, no interaction | Choropleth colored by `prop_a_city_no_canvassing_pct`; 24 of 791 polygons colored, rest transparent (outline only); coverage stated in a caption | — |
 | Switch field | User picks `2024_kamala` | Colors re-scale to that field's own range; tooltips unchanged (still all five) | — |
-| Hover a precinct with no CSV row | 707 of 791 polygons | Grey polygon; tooltip lists all five labels with `—` | — |
-| Blank vs zero | `0.0000` vs `""` | `0.0000` colored at scale minimum; `""` grey "no data" | — |
+| Hover a precinct with no CSV row | 707 of 791 polygons | Transparent fill, opaque outline; tooltip lists all five labels with `—` | — |
+| Blank vs zero | `0.0000` vs `""` | `0.0000` colored at scale minimum; `""` transparent "no data" (outline still drawn) | — |
 | Precinct in CSV, absent from layer | `1046` | Excluded from map; reported by count and id in a caption | Note, not error |
 | Click polygon | Selection carries `NewPrcnt` | Detail view renders the 26 labeled fields | — |
 | Click non-CSV polygon | `NewPrcnt` unmatched | Detail view states no data for that precinct | No traceback |
@@ -118,11 +118,12 @@ context:
 - `decorate()` returns a **list of pydeck records**, not a FeatureCollection: polygon rings under `__rings`, the layer's own properties promoted to top-level keys, plus `__color`, `__matched` and the five pre-formatted `v_<field>` values. `build_deck` feeds that straight to `data=` and the accessors name record keys. See the corrected API facts in Code Map — the browser parses these strings, it does not run them.
 - `detail_panel_fields()` decides Decision 1c from the data (drop fields blank in *every* row) rather than hard-coding the 17, so a field that later gains values appears without an edit. `NO_DATA_FIELDS` is asserted against it, keeping the frozen row checkable.
 - `build_data_dictionary.py` gained `READABLE_OVERRIDES` (54 entries), applied *after* label selection so it corrects DFS-inherited and `MANUAL` labels alike, plus a guard raising on an override naming a field no longer in the CSV (Decision 2b). `data/raw/` stays read-only.
-- Grey outlines (`LINE_COLOR`, opaque) keep precincts legible if MapLibre tiles never load — the offline-basemap path in Design Notes.
+- Outlines (`LINE_COLOR`, opaque, `line_width_min_pixels=1`) do double duty since 2026-11-12: they keep precincts legible if MapLibre tiles never load (the offline-basemap path in Design Notes), **and** they are now the only thing marking a no-data precinct, whose fill is transparent. The min-pixels clamp matters because `PolygonLayer` measures line width in METERS by default, which is sub-pixel at this zoom.
 - Left for the human (no browser in this environment): the plan's `## Verification` manual checks — hover coloured vs grey, click then click-a-second (no stacking), toggle all five fields, basemap legibility without tiles.
 
 ## Plan Change Log
 
+- 2026-11-12 (human request): **no-data precincts are transparent instead of grey.** `GREY = [200,200,200]` becomes `NO_DATA_COLOR = [0,0,0,0]`, so an empty precinct keeps its opaque boundary and sheds its fill. This renegotiates three frozen I/O & Edge-Case Matrix rows ("rest grey", "Grey polygon", `""` grey "no data") and the Design Notes' "grey-vs-colored" premise, on the explicit instruction; the blank-vs-zero distinction the frozen 'Always' rule protects is untouched — `0.0000` still fills at the scale minimum, only `""` goes transparent. Two consequences handled rather than assumed: (1) the outlines become the sole visual marker for 707 of 791 polygons, so `line_width_min_pixels=1` is pinned — deck.gl measures line width in meters by default, which is sub-pixel at this zoom, and `line_width_units` could NOT be used because pydeck would ship the string as `@@=pixels` for the browser to read as a record key (the same trap as the render crash above); (2) all fills are now RGBA, because deck.gl sizes the colour attribute from the first record and applies it to every one, so mixing `[r,g,b]` with `[r,g,b,a]` would misread the whole scale, not just the blanks. Picking stays intact: the shader discards on the picking-validity flag, not on fill alpha. Confirmed in chromium — 0 console errors, outline pixels 2.0% of the canvas, exact old-grey pixels 30 (i.e. gone; the ~10% near-grey earlier measured was the CARTO Positron basemap itself).
 - 2026-11-11 (implement): corrected `## Verification` boot command `localhost:8501/healthz` → `localhost:8501/_stcore/health`. `/healthz` serves the SPA HTML shell in streamlit 1.67; `/_stcore/health` returns `ok`. Verified both. No intent change.
 - 2026-11-11 (implement): Code Map per-field populated counts confirmed as written (24/63/63/84/25) by live measurement; an interim report of "64/64/85" was a mis-measurement and is not a plan error. Join cardinality is 84 of 85 with `1046` excluded, as the matrix states.
 - 2026-11-11 (implement): the first draft of `tests/test_dashboard.py` encoded matrix row "Precinct in CSV, absent from layer" backwards (asserted `1046` absent from the CSV index). Fixed the test to the frozen row — absent from the *layer*, present in the CSV. Never edited a matrix expectation to match code.
@@ -164,7 +165,7 @@ Browser crash on load — `Error: Unexpected "=" at character 2` in `DeckGlJsonC
 
 ## Design Notes
 
-Grey-vs-colored is the product for sparse fields, so no-data is a first-class style, not an absence of style. The default metric is populated for 24 of 84 matched precincts (a canvass-coverage proxy, not a result) — the map is intentionally mostly grey at default.
+Filled-vs-empty is the product for sparse fields, so no-data is a first-class style, not an absence of style — drawn as a transparent fill inside an opaque boundary rather than as a grey wash, so the basemap shows through the precincts that carry no value (renegotiated by the human 2026-11-12; it was grey at first delivery). The default metric is populated for 24 of 84 matched precincts (a canvass-coverage proxy, not a result) — the map is intentionally mostly empty at default.
 
 Normalize each color scale on the **selected field's own populated min/max**, never a fixed 0–1: `2024_kamala` spans 0.51–0.85 while the default spans 0.00–0.18, so a shared domain would flatten one and crush the other. Interpolate two colors across that domain; keep grey `[200,200,200]` for blank.
 
@@ -189,8 +190,8 @@ Keep the choropleth readable without the basemap: precincts must stay distinguis
 - `uv run streamlit run dashboard.py --server.headless true`, then open http://localhost:8501 -- expected: polygons draw and **the browser console is free of `Unexpected "="` / `Unexpected "{"`**. No Python-side check can see those two errors: pydeck marks every string layer prop `@@=` and the browser *parses* it, so an illegal expression fails only at render time (2026-11-12 incident).
 
 **Manual checks:**
-- Hover a colored precinct → five labeled values; hover a grey one → same five labels, all `—`.
+- Hover a colored precinct → five labeled values; hover an unfilled one → same five labels, all `—` (and it is still hoverable despite the transparent fill).
 - Click a precinct → detail fills; click another → view replaces it (no stacking).
 - Toggle all five fields: color changes, tooltips do not.
-- Basemap loads; confirm precincts remain legible if it does not.
+- Basemap loads; confirm precincts remain legible if it does not — with no-data precincts transparent, the outlines are what stop the map reading as blank polygons over tiles.
 - No raw field name (`prop_a_city_no_canvassing_pct`, `pct_nh_white`) appears in the rendered UI.
