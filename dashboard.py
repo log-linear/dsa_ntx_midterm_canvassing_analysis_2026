@@ -322,6 +322,15 @@ def bbox(features: list[dict[str, Any]]) -> tuple[float, float, float, float] | 
     return min(lons), min(lats), max(lons), max(lats)
 
 
+def field_domain(rows: list[dict[str, str]], field: str) -> tuple[float, float] | None:
+    """The populated min/max for one field.
+
+    The map's colour scale and the legend are both built from this, so the two
+    cannot end up describing different ranges.
+    """
+    return domain_for([to_float(r.get(field)) for r in rows])
+
+
 def decorate(
     features: list[dict[str, Any]], rows: list[dict[str, str]], field: str
 ) -> list[dict[str, Any]]:
@@ -333,7 +342,7 @@ def decorate(
     keys on the record, which is what the accessors below name.
     """
     index = join_index(rows)
-    domain = domain_for([to_float(r.get(field)) for r in rows])
+    domain = field_domain(rows, field)
     records = []
     for feature in features:
         geometry = feature.get("geometry") or {}
@@ -365,6 +374,90 @@ def detail_records(
         {"Metric": label_for(dictionary, f), "Value": format_value(to_float(row.get(f)))}
         for f in fields
     ]
+
+
+# ---------------------------------------------------------------------------
+# Colour legend -- pure string building, rendered by st.html under the map.
+#
+# Both swatch colours come out of `color_scale`, so the legend cannot drift from
+# the map: change COLOR_LOW, COLOR_HIGH or FILL_ALPHA and the two move together.
+# ---------------------------------------------------------------------------
+LEGEND_BAR_WIDTH = 300  # px
+LEGEND_BAR_HEIGHT = 14  # px
+MUTED = "rgba(128, 128, 128, 0.75)"  # chrome only -- never a ramp colour
+
+
+def _html_escape(text: object) -> str:
+    """Escape a value for the legend's markup.
+
+    Everything interpolated here is `format_value` output (digits, `%`, `,`,
+    em-dash), so this is belt-and-braces -- but the legend is raw HTML and no
+    text from the CSV or the live layer should ever reach it unescaped.
+    """
+    return (
+        str(text)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def _css_rgba(color: list[int]) -> str:
+    """An RGBA list as a CSS rgba() string, alpha normalised to 0-1."""
+    red, green, blue, alpha = color
+    return f"rgba({red}, {green}, {blue}, {alpha / 255:.3f})"
+
+
+def legend_html(domain: tuple[float, float] | None) -> str:
+    """A gradient bar labelled with the selected field's own populated min/max.
+
+    Both degenerate domains are handled: `None` when no precinct carries a value
+    for the field at all, and `lo == hi`, where a gradient would be a lie. The
+    "no value" key needs a dashed outline because that style is a transparent
+    fill with no border -- on the default metric it describes 767 of 791
+    precincts, so a swatch that simply omitted its background would render as
+    nothing at all and the legend would look broken.
+    """
+    row = "display:flex;align-items:center;gap:8px;"
+    bar = f"width:{LEGEND_BAR_WIDTH}px;height:{LEGEND_BAR_HEIGHT}px;border-radius:3px;"
+    edge = f"border:1px solid {MUTED};"
+
+    if domain is None:
+        scale = (
+            '<div style="display:flex;align-items:center;'
+            f'height:{LEGEND_BAR_HEIGHT}px;">'
+            "No precinct in the extract carries a value for this metric.</div>"
+        )
+    else:
+        lo, hi = domain
+        low = _css_rgba(color_scale(lo, domain))
+        high = _css_rgba(color_scale(hi, domain))
+        if lo == hi:
+            swatch = f'<div style="{bar}{edge}background:{low};"></div>'
+        else:
+            gradient = f"linear-gradient(90deg, {low} 0%, {high} 100%)"
+            swatch = f'<div style="{bar}{edge}background:{gradient};"></div>'
+        scale = (
+            f'<div style="{row}justify-content:space-between;'
+            f'width:{LEGEND_BAR_WIDTH}px;">'
+            f"<span>{_html_escape(format_value(lo))}</span>"
+            f"<span>{_html_escape(format_value(hi))}</span></div>"
+            f"<div>{swatch}</div>"
+        )
+
+    empty = (
+        f'<div style="width:{LEGEND_BAR_HEIGHT}px;height:{LEGEND_BAR_HEIGHT}px;'
+        f'border:1px dashed {MUTED};border-radius:3px;background:transparent;"></div>'
+    )
+    return (
+        '<div style="display:flex;flex-direction:column;gap:4px;'
+        'font-size:0.82rem;line-height:1.4;padding-top:2px;">'
+        f"{scale}"
+        f'<div style="{row}padding-top:6px;">{empty}'
+        "<span>No value for this metric (precinct draws nothing)</span></div>"
+        "</div>"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -491,7 +584,9 @@ def main() -> None:
             "nothing, but stay hoverable and clickable."
         )
 
-    st.title("Precinct choropleth")
+    # The title names the metric actually on the map, so a screenshot or a
+    # printed page carries it without the sidebar being visible.
+    st.title(labels[field])
 
     try:
         features = _cached_features()["features"]
@@ -517,6 +612,9 @@ def main() -> None:
         width="stretch",
         height=680,
     )
+
+    # Directly under the map, so the ramp and its range read as one unit.
+    st.html(legend_html(field_domain(rows, field)))
 
     left, right = st.columns([3, 2])
     with left:

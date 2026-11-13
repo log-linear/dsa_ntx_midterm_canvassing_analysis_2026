@@ -461,6 +461,52 @@ assert not any("20261108" in c.value or "data/raw" in c.value for c in at.captio
 assert any("84 of 85" in c.value for c in at.caption), "match count not stated"
 ok("default load colours by prop_a_city_no_canvassing_pct and states 24 of 791 coverage")
 
+# --- the title names the field on the map --------------------------------
+# It used to be the fixed string "Precinct choropleth".  Asserting it equals the
+# sidebar's own selection is the whole point: a title that drifted from the
+# metric would misreport the map, which is worse than a generic heading.
+assert [t.value for t in at.title] == [side.value], (at.title, side.value)
+assert not any("Precinct choropleth" in t.value for t in at.title), "the fixed heading is back"
+ok("title is the selected choropleth field's readable label")
+
+# --- the legend must REACH the render stream -----------------------------
+# Asserting a legend string can be *built* is what let the tooltip ship unread.
+# This asserts one html block arrives, holding this field's real range and the
+# same colours the map paints with.
+assert len(at.html) == 1, f"expected exactly one legend block, got {len(at.html)}"
+default_domain = dashboard.field_domain(rows, dashboard.DEFAULT_CHOROPLETH)
+legend = at.html[0].value
+assert isinstance(legend, str) and legend == dashboard.legend_html(default_domain)
+lo, hi = default_domain
+for endpoint in (dashboard.format_value(lo), dashboard.format_value(hi)):
+    assert endpoint in legend, f"legend does not state the populated min/max {endpoint}"
+for swatch in (dashboard.color_scale(lo, default_domain),
+               dashboard.color_scale(hi, default_domain)):
+    red, green, blue, alpha = swatch
+    assert f"rgba({red}, {green}, {blue}, {alpha / 255:.3f})" in legend, swatch
+ok("legend ships under the map with this field's own min/max and swatch colours")
+
+# Both sides call color_scale, so the legend inherits FILL_ALPHA instead of
+# restating it.  A legend that hard-coded its own colours would pass every check
+# above and still misrepresent the map the moment opacity changed.
+assert f", {dashboard.FILL_ALPHA / 255:.3f})" in legend, "legend opacity is not FILL_ALPHA"
+assert "linear-gradient" in legend, "a two-valued domain must render as a ramp"
+ok("legend opacity is inherited from FILL_ALPHA, not restated")
+
+# The empty style is a transparent fill with no border, so its key needs an
+# outline of its own -- on the default metric it describes 767 of 791 precincts,
+# and an outline-less swatch would draw nothing at all.
+assert "dashed" in legend and "No value for this metric" in legend
+ok("legend keys the empty style with a dashed outline")
+
+# Order is part of "underneath the map": heading, map, legend, then captions.
+stream = [getattr(e, "type", "") or type(e).__name__ for e in at.main]
+for probe in ("title", "deck_gl_json_chart", "html", "caption"):
+    assert probe in stream, (probe, stream)
+order = [stream.index(p) for p in ("title", "deck_gl_json_chart", "html", "caption")]
+assert order == sorted(order), f"legend is out of place: {stream}"
+ok("render order is title, map, legend, captions")
+
 # No selection yet: a prompt, and no empty table.
 assert at.dataframe == [], f"detail table rendered with no click: {at.dataframe}"
 assert any("Click a precinct" in i.value for i in at.info), [i.value for i in at.info]
@@ -491,6 +537,25 @@ same = all(
 assert same, "tooltip values changed when the colour field changed"
 assert dashboard.tooltip_template(dictionary) == template, "tooltip is field-dependent"
 ok("switching field re-scales colour and leaves all five tooltip metrics unchanged")
+
+# Same rerun: switching the metric must retitle the app AND relabel the legend,
+# and the old field's endpoints must be gone rather than merely superseded.
+assert [t.value for t in at2.title] == [kamala], at2.title
+domain_k = dashboard.field_domain(rows, "2024_kamala")
+assert at2.html[0].value == dashboard.legend_html(domain_k), "legend did not follow the field"
+assert dashboard.format_value(domain_k[1]) in at2.html[0].value, "new max missing"
+assert dashboard.format_value(default_domain[1]) not in at2.html[0].value, "stale endpoint left"
+ok("switching field retitles the app and relabels the legend's range")
+
+# Degenerate domains. A gradient across one number would claim a spread the
+# field does not have; a field with no values at all has no ramp to draw.
+flat = dashboard.legend_html((0.5, 0.5))
+assert "linear-gradient" not in flat, "gradient implies a range that does not exist"
+assert flat.count(dashboard.format_value(0.5)) == 2, flat
+nothing = dashboard.legend_html(None)
+assert "linear-gradient" not in nothing and "carries a value" in nothing
+assert "No value for this metric" in nothing, "the key vanished along with the ramp"
+ok("legend handles a single-valued field and a field with no values at all")
 
 # Click a polygon whose precinct is in the CSV: 17 labeled metrics, no raw names.
 clicked = {dashboard.JOIN_LAYER_KEY: "1045"}
@@ -531,6 +596,15 @@ assert dashboard.LAYER_URL in at5.error[0].value, at5.error[0].value
 assert len(at5.dataframe) == 1, "joined-field UI did not render offline"
 assert len(at5.dataframe[0].value) == 17, at5.dataframe[0].value.shape
 ok("layer unreachable -> one st.error naming the URL, joined fields still render")
+
+# The title is chosen before the layer is fetched, so it still names the metric
+# offline.  The legend keys the MAP's ramp and there is no map, so none renders:
+# a legend over an absent map would describe colours nobody can see.
+assert [t.value for t in at5.title] == [
+    dashboard.label_for(dictionary, dashboard.DEFAULT_CHOROPLETH)
+], at5.title
+assert len(at5.html) == 0, f"a legend appeared with no map to key: {at5.html}"
+ok("offline -> title still names the field, no legend without the map")
 
 # A field the dictionary cannot name fails fast rather than rendering blank.
 sabotaged = {k: v for k, v in dictionary.items() if k != "pct_nh_white"}
