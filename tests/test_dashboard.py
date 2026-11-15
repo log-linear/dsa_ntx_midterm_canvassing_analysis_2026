@@ -490,7 +490,11 @@ def run_app(fc=None, selected=None, timeout=120):
     return at
 
 
-# Default load: colour field, coverage caption, 24 of 791, all on the live layer.
+# Default load: colour field, coverage caption, populated count of 791, all on
+# the live layer.  The coverage figure is read from `populated` (computed above
+# from the CSV) rather than typed in, so it cannot drift when the metric's
+# formula changes -- the caption is required to agree with the data, not with a
+# number remembered from an earlier build.
 at = run_app()
 choropleth_labels = [dashboard.label_for(dictionary, f) for f in dashboard.CHOROPLETH_FIELDS]
 side = at.selectbox[0]
@@ -502,11 +506,17 @@ assert [o for o in side.options] == choropleth_labels, side.options
 assert set(dashboard.CHOROPLETH_FIELDS) < set(dashboard.TOOLTIP_FIELDS), (
     dashboard.CHOROPLETH_FIELDS, dashboard.TOOLTIP_FIELDS
 )
-assert any("24 of 791 polygons are coloured by" in c.value for c in at.caption), [c.value for c in at.caption]
+expected_colored = populated[dashboard.DEFAULT_CHOROPLETH]
+expected_remaining = stats["polygons"] - expected_colored
+coverage = f"{expected_colored} of {stats['polygons']} polygons are coloured by"
+assert any(coverage in c.value for c in at.caption), [c.value for c in at.caption]
+assert any(
+    f"the remaining {expected_remaining} carry no value" in c.value for c in at.caption
+), [c.value for c in at.caption]
 assert any("1046" in c.value for c in at.caption), "exclusion not reported"
 assert not any("20261108" in c.value or "data/raw" in c.value for c in at.caption), "a source path leaked into the UI"
 assert any("84 of 85" in c.value for c in at.caption), "match count not stated"
-ok("default load colours by prop_a_city_no_canvassing_pct and states 24 of 791 coverage")
+ok("default load colours by prop_a_city_no_canvassing_pct and states coverage", f"{expected_colored} of {stats['polygons']}")
 
 # --- the title names the field on the map --------------------------------
 # It used to be the fixed string "Precinct choropleth".  Asserting it equals the
@@ -541,8 +551,9 @@ assert "linear-gradient" in legend, "a two-valued domain must render as a ramp"
 ok("legend opacity is inherited from FILL_ALPHA, not restated")
 
 # The empty style is a transparent fill with no border, so its key needs an
-# outline of its own -- on the default metric it describes 767 of 791 precincts,
-# and an outline-less swatch would draw nothing at all.
+# outline of its own -- on the default metric it describes most precincts (the
+# layer far outnumbers the rows carrying a value), and an outline-less swatch
+# would draw nothing at all.
 assert "dashed" in legend and "No value for this metric" in legend
 ok("legend keys the empty style with a dashed outline")
 

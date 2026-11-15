@@ -17,7 +17,8 @@ Pipeline
    precinct number (one-to-many: a precinct covers several census VTDs), then
    onto the DFS export on ``census_vtd_geoid`` == ``source_ref``, then onto
    ``data/raw/detail.xlsx`` sheet 72 on the precinct number prefix; add
-   ``prop_a_city_no_canvassing_pct`` = strong_no / canvass_attempts and
+   ``prop_a_city_no_canvassing_pct`` =
+   strong_no / round(canvass_attempts * response_rate) and
    ``prop_a_city_no_actual_pct`` = Against total / Total votes cast and
    ``pct_renter_occupied`` = 1 - pct_owner_occupied.
 5. Collapse the joined output to one row per ``dallas_county_precinct_number``
@@ -82,7 +83,7 @@ PROP_A_GROUP_ROW = 2
 PROP_A_FIRST_DATA_ROW = 4
 PROP_A_KEY_PREFIX = 4        # join on the first four chars of `Precinct`
 SHARE_COL = "share_of_county_precinct"  # crosswalk: how much of the precinct this VTD covers
-NO_PCT_COL = "prop_a_city_no_canvassing_pct"   # canvassing proxy: strong_no / canvass_attempts
+NO_PCT_COL = "prop_a_city_no_canvassing_pct"   # no-rate of responders: strong_no / round(canvass_attempts * response_rate)
 NO_ACTUAL_PCT_COL = "prop_a_city_no_actual_pct"  # actual result: Against votes / Total votes
 RENTER_COL = "pct_renter_occupied"  # complement of the DFS owner-occupied share
 OUT = DATA / "precinct_data.csv"
@@ -329,8 +330,34 @@ def ratio(numerator_raw, denominator_raw):
     return fmt_number(round(numerator / denominator, 6))
 
 
+def response_weighted_ratio(numerator_raw, attempts_raw, rate_raw):
+    """numerator / round(attempts * rate) as text.
+
+    `strong_no` counts RESPONSES, so dividing it by canvass ATTEMPTS understates
+    the no-rate of everyone who actually answered -- precincts with a low
+    response rate looked uniformly friendly.  The denominator is therefore the
+    estimated number of responses, attempts x response_rate, rounded to a whole
+    count.  Rounding is applied to the denominator only, never to the share.
+
+    Blank when any input is missing, and when the rounded denominator is 0: a
+    precinct whose responses round to none has no defined no-rate, so it reads
+    missing rather than 0 -- see the note on blanks in the module docstring.
+    Two precincts (4073, 2150) have a 0 response rate recorded and so drop out
+    of the populated count here; both had `strong_no` = 0, i.e. they carried
+    only ever a zero no-rate.
+    """
+    numerator = as_number(numerator_raw)
+    attempts, rate = as_number(attempts_raw), as_number(rate_raw)
+    if numerator is None or attempts is None or rate is None:
+        return ""
+    denominator = round(attempts * rate)
+    if denominator == 0:
+        return ""
+    return fmt_number(round(numerator / denominator, 6))
+
+
 # Two independent "Prop A No" shares per precinct:
-#   NO_PCT_COL         canvassing proxy  -- strong_no / canvass_attempts
+#   NO_PCT_COL         canvassing proxy  -- strong_no / round(canvass_attempts * response_rate)
 #   NO_ACTUAL_PCT_COL  actual result     -- Against total / Total votes cast
 
 
@@ -478,7 +505,9 @@ def main() -> None:
             unmatched_prop.append(rec[PRECINCT_COL])
         derived = {
             **{c: "" for c in prop_a_cols},
-            NO_PCT_COL: ratio(rec.get("strong_no"), rec.get("canvass_attempts")),
+            NO_PCT_COL: response_weighted_ratio(
+                rec.get("strong_no"), rec.get("canvass_attempts"), rec.get("response_rate")
+            ),
             NO_ACTUAL_PCT_COL: "",
             RENTER_COL: "",
         }

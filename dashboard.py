@@ -452,9 +452,10 @@ def legend_html(domain: tuple[float, float] | None) -> str:
     Both degenerate domains are handled: `None` when no precinct carries a value
     for the field at all, and `lo == hi`, where a gradient would be a lie. The
     "no value" key needs a dashed outline because that style is a transparent
-    fill with no border -- on the default metric it describes 767 of 791
-    precincts, so a swatch that simply omitted its background would render as
-    nothing at all and the legend would look broken.
+    fill with no border -- on the default metric it describes most of the 791
+    precincts (all but those carrying a value), so a swatch that simply omitted
+    its background would render as nothing at all and the legend would look
+    broken.
     """
     row = "display:flex;align-items:center;gap:8px;"
     bar = f"width:{LEGEND_BAR_WIDTH}px;height:{LEGEND_BAR_HEIGHT}px;border-radius:3px;"
