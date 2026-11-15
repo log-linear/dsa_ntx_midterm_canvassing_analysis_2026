@@ -75,16 +75,17 @@ MANUAL = {
         "Source Row Alignment",
     ),
     "2024_prop_r_for": (
-        "integer",
-        "2024 Proposition 14 (Prop R) votes FOR, as recorded by district volunteers "
-        "in the canvassing workbooks. Blank where the source sheet did not record it "
-        "(including all rows whose values were column-shifted).",
+        "number",
+        "Share of the 2024 vote on Proposition 14 (Prop R) cast FOR, as recorded in "
+        "the canvassing workbooks (fraction 0-1). Blank where the source sheet did "
+        "not record it, including every row whose values were column-shifted.",
         "2024 Prop R (For)",
     ),
     "2024_prop_u_against": (
-        "integer",
-        "2024 Proposition 5 (Prop U) votes AGAINST, as recorded in the canvassing "
-        "workbooks. Blank where the source sheet did not record it.",
+        "number",
+        "Share of the 2024 vote on Proposition 5 (Prop U) cast AGAINST, as recorded "
+        "in the canvassing workbooks (fraction 0-1). Blank where the source sheet "
+        "did not record it.",
         "2024 Prop U (Against)",
     ),
     "2024_kamala": (
@@ -395,7 +396,13 @@ def reconcile(field, values, declared):
         non_num = sorted({v for v in vals if classify([v]) == "text"})[:3]
         parts.append(f"holds non-numeric values {non_num} despite source declaring {declared}")
     if declared in ("integer", "number") and final in ("integer", "number") and declared != final:
-        parts.append(f"whole numbers in this extract, declared {declared} upstream")
+        # Say what the extract holds, not what `declared` implies it should. The
+        # shape and the declaration disagree in BOTH directions: whole numbers
+        # under a `number` declaration, and fractions under an `integer` one.
+        # Naming only the first let a mis-declared share column ship a caveat
+        # claiming its fractions were whole numbers.
+        shape = "whole numbers" if final == "integer" else "fractions"
+        parts.append(f"{shape} in this extract, declared {declared} upstream")
     caveat = f" ({'; '.join(parts)})." if parts else "."
     return final, caveat
 
