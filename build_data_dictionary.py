@@ -107,22 +107,17 @@ MANUAL = {
     ),
     "canvass_attempts": (
         "integer",
-        "Canvass attempts logged by district volunteers. Scaled by response_rate "
-        "to form the denominator of prop_a_city_no_canvassing_pct; "
-        "0 or blank means no canvass data.",
+        "Total canvas attempts (i.e. knocked doors) within a given precinct.",
         "Canvass Attempts",
     ),
     "response_rate": (
         "number",
-        "Share of canvassed households that responded (fraction 0-1). "
-        "canvass_attempts x response_rate estimates the number of responses, the "
-        "denominator of prop_a_city_no_canvassing_pct.",
+        "Share of canvassed households that responded (fraction 0-1). ",
         "Canvass Response Rate",
     ),
     "strong_no": (
         "integer",
-        "Voters canvassers recorded as a 'strong no' -- the numerator of "
-        "prop_a_city_no_canvassing_pct. A count of *responses*, not of attempts.",
+        "Number of canvassed voters (i.e. those who answered the door) who indicated 'strong no' on Prop A",
         "Strong No (Canvassed)",
     ),
     "2026_turnout": (
@@ -223,12 +218,7 @@ MANUAL = {
     # --- derived ---
     "prop_a_city_no_canvassing_pct": (
         "number",
-        "strong_no / round(canvass_attempts * response_rate): share of a precinct's "
-        "voters who *responded* to the canvass and said a strong no. The denominator "
-        "estimates responses rather than attempts, so a low response rate no longer "
-        "flattens the figure. A canvass-based estimate, not an election result "
-        "(compare prop_a_city_no_actual_pct); blank where attempts, response rate or "
-        "strong_no is missing, and where the rounded response count is 0.",
+        "Percentage of canvassed voters (i.e. those who answered the door) who indicated 'strong no' on Prop A",
         "Prop A No Share (Canvassed)",
     ),
     "prop_a_city_no_actual_pct": (
