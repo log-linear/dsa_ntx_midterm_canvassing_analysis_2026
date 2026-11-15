@@ -65,7 +65,10 @@ index = dashboard.join_index(rows)
 labels = {f: dashboard.label_for(dictionary, f) for f in dashboard.DETAIL_FIELDS}
 
 # --- dictionary coverage: every field the dashboard touches is documented ----
-all_needed = dashboard.CHOROPLETH_FIELDS + dashboard.DETAIL_FIELDS + [dashboard.JOIN_CSV_KEY]
+all_needed = (
+    dashboard.CHOROPLETH_FIELDS + dashboard.TOOLTIP_FIELDS
+    + dashboard.DETAIL_FIELDS + [dashboard.JOIN_CSV_KEY]
+)
 missing = [f for f in all_needed if f not in dictionary]
 assert not missing, f"undocumented fields: {missing}"
 ok("dictionary covers every dashboard field", f"{len(dictionary)} entries")
@@ -113,18 +116,19 @@ for field, want in EXPECTED.items():
     assert got == want, f"{field}: {got!r} != {want!r}"
 ok("label overrides match the human's worked examples", f"{len(EXPECTED)} checked")
 
-# the five choropleth labels were already correct upstream -- still asserted
+# the choropleth and tooltip labels were already correct upstream
 CHOR_EXPECT = {
     "prop_a_city_no_canvassing_pct": "Prop A No Share (Canvassed)",
     "2024_prop_r_for": "2024 Prop R (For)",
     "2024_prop_u_against": "2024 Prop U (Against)",
     "2024_kamala": "2024 Kamala Vote Share",
     "response_rate": "Canvass Response Rate",
+    "canvass_attempts": "Canvass Attempts",
 }
 for field, want in CHOR_EXPECT.items():
     got = dashboard.label_for(dictionary, field)
     assert got == want, f"choropleth label {field}: {got!r} != {want!r}"
-ok("the five choropleth labels are the readable ones")
+ok("every choropleth and tooltip label is the readable one")
 
 # --- blank vs zero ----------------------------------------------------------
 assert dashboard.to_float("") is None
@@ -137,6 +141,19 @@ assert dashboard.format_value(None) == dashboard.NO_DATA_TEXT
 assert dashboard.format_value(0.0) == "0.0%"
 assert dashboard.format_value(None) != dashboard.format_value(0.0)
 ok("blank and zero render differently")
+
+# Units come from the field's own range, never from the size of one value.
+# `canvass_attempts` is an integer 0-613; guessing per value rendered zero
+# attempts as "0.0%" and one attempt as "100.0%" while 113 stayed "113".
+attempts = dashboard.field_domain(rows, "canvass_attempts")
+assert attempts and not dashboard.domain_is_share(attempts), attempts
+assert dashboard.format_value(0.0, fraction=False) == "0"
+assert dashboard.format_value(1.0, fraction=False) == "1"
+assert dashboard.format_value(613.0, fraction=False) == "613"
+rates = dashboard.field_domain(rows, "response_rate")
+assert dashboard.domain_is_share(rates), rates
+assert dashboard.format_value(0.0) == dashboard.format_value(0.0, True)
+ok("counts and shares told apart by the field's range, not per value")
 
 # a real 0.0 must take the scale minimum, not the empty no-data style
 zero_field = "prop_a_city_no_canvassing_pct"
@@ -221,14 +238,39 @@ ok("missing dictionary entry fails fast naming the field")
 template = dashboard.tooltip_template(dictionary)
 tokens = re.findall(r"\{([^{}]+)\}", template)
 assert tokens == [dashboard.JOIN_LAYER_KEY] + [
-    "v_" + f for f in dashboard.CHOROPLETH_FIELDS
+    "v_" + f for f in dashboard.TOOLTIP_FIELDS
 ], tokens
 body = re.sub(r"\{[^{}]+\}", "", template)
-for field in dashboard.CHOROPLETH_FIELDS:
+for field in dashboard.TOOLTIP_FIELDS:
     assert dashboard.label_for(dictionary, field) in template, field
     assert field not in body, f"raw field name visible in tooltip: {field}"
-assert template.count("\n") == len(dashboard.CHOROPLETH_FIELDS), template
-ok("tooltip template carries the precinct id plus all five labelled slots")
+assert template.count("\n") == len(dashboard.TOOLTIP_FIELDS), template
+ok("tooltip template carries the precinct id plus all labelled slots")
+
+# The guard this refactor needed. The template and the record keys are built
+# from DIFFERENT lists, so a token can be perfectly well-formed and still
+# resolve to nothing -- and Streamlit then renders the token as its own
+# literal text, which is exactly the "v_2024_prop_r_for" that hit the screen.
+# Asserting the template against a field list was self-consistent and told
+# no lies but proved nothing about the layer; assert against the records.
+hovered = dashboard.decorate(
+    [{"properties": {dashboard.JOIN_LAYER_KEY: "1046"}}],
+    rows,
+    dashboard.DEFAULT_CHOROPLETH,
+)[0]
+unresolved = [t for t in tokens if t not in hovered]
+assert not unresolved, (
+    f"tooltip asks for {unresolved}: no such key on the records handed to the "
+    "layer, so it renders as the token text instead of a value"
+)
+# and the counts stay counts once they reach a record
+zeroed = dashboard.decorate(
+    [{"properties": {dashboard.JOIN_LAYER_KEY: "4080"}}], rows, dashboard.DEFAULT_CHOROPLETH
+)[0]
+assert index["4080"]["canvass_attempts"] == "0", index["4080"]["canvass_attempts"]
+assert zeroed["v_canvass_attempts"] == "0", zeroed["v_canvass_attempts"]
+ok("every tooltip token resolves against the records the layer is given")
+
 
 fc = dashboard.decorate(
     [{"properties": {dashboard.JOIN_LAYER_KEY: key}} for key in ["1046", "999999"]],
@@ -238,17 +280,17 @@ fc = dashboard.decorate(
 with_data, without_data = fc  # decorate() yields records, not features
 for props in (with_data, without_data):
     slots = [k for k in props if k.startswith("v_")]
-    assert len(slots) == 5, slots
-assert sum(1 for k in with_data if k.startswith("v_")) == 5
+    assert len(slots) == len(dashboard.TOOLTIP_FIELDS), slots
+assert sum(1 for k in with_data if k.startswith("v_")) == len(dashboard.TOOLTIP_FIELDS)
 # a polygon whose precinct is in the CSV: unmatched polygons get em-dashes, not gaps
 assert without_data["__matched"] is False
 assert without_data["__color"] == dashboard.NO_DATA_COLOR
-for field in dashboard.CHOROPLETH_FIELDS:
+for field in dashboard.TOOLTIP_FIELDS:
     assert without_data["v_" + field] == dashboard.NO_DATA_TEXT, field
-ok("a data-less precinct still lists all five labels, each as an em-dash")
+ok("a data-less precinct still lists every tooltip label, each as an em-dash")
 assert with_data["__matched"] is True
 assert index["1046"] is not None
-ok("joined precinct carries its own values alongside the five slots")
+ok("joined precinct carries its own values alongside the tooltip slots")
 
 # --- join against the live layer ------------------------------------------
 # The live endpoint is part of the plan's contract, so these checks run or the
@@ -365,7 +407,7 @@ ok("stroked serialises as boolean false and no line props remain")
 assert "=>" not in dj, "an arrow function reached the serialised deck"
 record_keys = set(dashboard.decorate(features, rows, "2024_kamala")[0])
 needed = ({dashboard.JOIN_LAYER_KEY, "__color", "__rings"}
-          | {"v_" + f for f in dashboard.CHOROPLETH_FIELDS})
+          | {"v_" + f for f in dashboard.TOOLTIP_FIELDS})
 missing = sorted(needed - record_keys)
 assert not missing, f"an accessor names a key the records do not carry: {missing}"
 ok("every @@= prop is a JSON expression over keys the records have")
@@ -450,11 +492,16 @@ def run_app(fc=None, selected=None, timeout=120):
 
 # Default load: colour field, coverage caption, 24 of 791, all on the live layer.
 at = run_app()
-labels5 = [dashboard.label_for(dictionary, f) for f in dashboard.CHOROPLETH_FIELDS]
+choropleth_labels = [dashboard.label_for(dictionary, f) for f in dashboard.CHOROPLETH_FIELDS]
 side = at.selectbox[0]
 assert side.label == "Colour precincts by", side.label
 assert side.value == dashboard.label_for(dictionary, dashboard.DEFAULT_CHOROPLETH), side.value
-assert [o for o in side.options] == labels5, side.options
+assert [o for o in side.options] == choropleth_labels, side.options
+# Colouring and tooltiping are separate concerns now, so the sets differ:
+# everything colourable is also shown on hover, but not vice versa.
+assert set(dashboard.CHOROPLETH_FIELDS) < set(dashboard.TOOLTIP_FIELDS), (
+    dashboard.CHOROPLETH_FIELDS, dashboard.TOOLTIP_FIELDS
+)
 assert any("24 of 791 polygons are coloured by" in c.value for c in at.caption), [c.value for c in at.caption]
 assert any("1046" in c.value for c in at.caption), "exclusion not reported"
 assert not any("20261108" in c.value or "data/raw" in c.value for c in at.caption), "a source path leaked into the UI"
@@ -513,21 +560,23 @@ assert any("Click a precinct" in i.value for i in at.info), [i.value for i in at
 assert any("Precinct detail" in s.value for s in at.subheader)
 ok("no selection -> prompt to click, no empty table")
 
-# 707 of 791 polygons hold no CSV row; each still carries all five em-dashes.
+# 707 of 791 polygons hold no CSV row; each still carries an em-dash per field.
 decorated = dashboard.decorate(features, rows, dashboard.DEFAULT_CHOROPLETH)
 bare = [r for r in decorated if not r["__matched"]]
 assert len(bare) == 791 - 84, len(bare)
 assert all(r["__color"] == dashboard.NO_DATA_COLOR for r in bare)
-assert all(r["v_" + fld] == dashboard.NO_DATA_TEXT for r in bare for fld in dashboard.CHOROPLETH_FIELDS)
-ok("a precinct with no CSV row is unfilled and lists all five metrics as em-dashes", f"{len(bare)} of 791")
+assert all(r["v_" + fld] == dashboard.NO_DATA_TEXT for r in bare for fld in dashboard.TOOLTIP_FIELDS)
+ok("a precinct with no CSV row is unfilled and lists every metric as an em-dash", f"{len(bare)} of 791")
 
 # Switch field: colours re-scale to that field's range; tooltip values do not move.
-kamala = dashboard.label_for(dictionary, "2024_kamala")
+# `canvass_attempts` is chosen because it is colourable AND a count (0-613), so the
+# rerun also proves the share/count decision reaches the rendered legend.
+attempts = dashboard.label_for(dictionary, "canvass_attempts")
 at2 = run_app()
-at2.selectbox[0].set_value(kamala)
+at2.selectbox[0].set_value(attempts)
 at2.run()
-assert any(f"84 of 791 polygons are coloured by {kamala}" in c.value for c in at2.caption), [c.value for c in at2.caption]
-other = dashboard.decorate(features, rows, "2024_kamala")
+assert any("49 of 791 polygons are coloured by " + attempts in c.value for c in at2.caption), [c.value for c in at2.caption]
+other = dashboard.decorate(features, rows, "canvass_attempts")
 same = all(
     a[k] == b[k]
     for a, b in zip(decorated, other)
@@ -536,16 +585,21 @@ same = all(
 )
 assert same, "tooltip values changed when the colour field changed"
 assert dashboard.tooltip_template(dictionary) == template, "tooltip is field-dependent"
-ok("switching field re-scales colour and leaves all five tooltip metrics unchanged")
+ok("switching field re-scales colour and leaves every tooltip metric unchanged")
 
 # Same rerun: switching the metric must retitle the app AND relabel the legend,
 # and the old field's endpoints must be gone rather than merely superseded.
-assert [t.value for t in at2.title] == [kamala], at2.title
-domain_k = dashboard.field_domain(rows, "2024_kamala")
-assert at2.html[0].value == dashboard.legend_html(domain_k), "legend did not follow the field"
-assert dashboard.format_value(domain_k[1]) in at2.html[0].value, "new max missing"
-assert dashboard.format_value(default_domain[1]) not in at2.html[0].value, "stale endpoint left"
-ok("switching field retitles the app and relabels the legend's range")
+assert [t.value for t in at2.title] == [attempts], at2.title
+domain_k = dashboard.field_domain(rows, "canvass_attempts")
+legend_k = at2.html[0].value
+assert legend_k == dashboard.legend_html(domain_k), "legend did not follow the field"
+assert not dashboard.domain_is_share(domain_k), domain_k
+assert ">613<" in legend_k, f"count max not rendered as a count: {legend_k}"
+assert ">0<" in legend_k, f"count min not rendered as a count: {legend_k}"
+# "0.0%" would mean the attempts column was read as a share.
+assert "0.0%" not in legend_k, "a count field was percent-formatted in the legend"
+assert dashboard.format_value(default_domain[1]) not in legend_k, "stale endpoint left"
+ok("switching field retitles the app and relabels the legend, counts as counts")
 
 # Degenerate domains. A gradient across one number would claim a spread the
 # field does not have; a field with no values at all has no ramp to draw.

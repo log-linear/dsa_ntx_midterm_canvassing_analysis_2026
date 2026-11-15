@@ -26,7 +26,7 @@ import urllib.request
 
 import streamlit as st
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 BASE = Path(__file__).resolve().parent
 DATA = BASE / "data"
@@ -45,13 +45,22 @@ LAYER_URL = (
 JOIN_LAYER_KEY = "NewPrcnt"
 JOIN_CSV_KEY = "dallas_county_precinct_number"
 
-# The choropleth field is user-selectable across exactly these five.
+# The choropleth field is user-selectable across exactly these.
+# TOOLTIP_FIELDS is a deliberately wider list: what hovering shows. The two
+# are separate concerns, so keep them separate -- `decorate` builds the
+# record keys the tooltip reads from TOOLTIP_FIELDS, never from this list.
 CHOROPLETH_FIELDS = [
     "prop_a_city_no_canvassing_pct",
+    "canvass_attempts",
+    "response_rate",
+]
+TOOLTIP_FIELDS = [
+    "prop_a_city_no_canvassing_pct",
+    "canvass_attempts",
+    "response_rate",
     "2024_prop_r_for",
     "2024_prop_u_against",
     "2024_kamala",
-    "response_rate",
 ]
 DEFAULT_CHOROPLETH = "prop_a_city_no_canvassing_pct"
 
@@ -204,17 +213,35 @@ def to_float(value) -> float | None:
         return None
 
 
-def format_value(value: float | None) -> str:
+def format_value(value: float | None, fraction: bool = True) -> str:
     """Format a parsed number for display.
 
     Called only on floats that `to_float` produced (or None), so no source
     string ever reaches the tooltip unformatted.
+
+    `fraction` says whether the field holds a share (0-1) or a count.  It used
+    to be guessed from the magnitude of each value, which misread counts:
+    `canvass_attempts` 0 became "0.0%" and 1 became "100.0%" while 113 stayed
+    "113", so one column told three stories.  Callers decide from the field's own
+    populated range, which is measurable and stays consistent between the tooltip
+    and the legend.
     """
     if value is None:
         return NO_DATA_TEXT
-    if 0.0 <= value <= 1.0:
+    if fraction and 0.0 <= value <= 1.0:
         return f"{value * 100:.1f}%"
     return f"{value:,.4g}"
+
+
+def domain_is_share(domain: tuple[float, float] | None) -> bool:
+    """True when a field's populated values all lie inside 0-1, i.e. it holds a
+    share rather than a count.
+
+    Decided once per field from the whole extract, never per value: guessing it
+    from magnitude made `canvass_attempts` print "0.0%" for zero attempts and
+    "100.0%" for one while 113 stayed "113", three readings for one column.
+    """
+    return domain is not None and domain[0] >= 0.0 and domain[1] <= 1.0
 
 
 def domain_for(values: list[float | None]) -> tuple[float, float] | None:
@@ -259,7 +286,7 @@ def tooltip_template(
     innerText, so `\\n` breaks a line and no markup is involved.
     """
     lines = [f"Precinct {{{JOIN_LAYER_KEY}}}"]
-    for field in CHOROPLETH_FIELDS:
+    for field in TOOLTIP_FIELDS:
         lines.append(f"{label_for(dictionary, field)}: {{{prefix}{field}}}")
     return "\n".join(lines)
 
@@ -338,11 +365,15 @@ def decorate(
 
     Records, not the GeoJSON FeatureCollection, because Streamlit's deck.gl
     bridge iterates `data` directly.  A polygon's rings ride along as
-    `__rings`; colour, match state and the pre-formatted five metrics are plain
+    `__rings`; colour, match state and the pre-formatted tooltip metrics are plain
     keys on the record, which is what the accessors below name.
     """
     index = join_index(rows)
     domain = field_domain(rows, field)
+    # Whether each tooltip field holds a share (0-1) or a count, decided once per
+    # field from the whole extract -- never per value.  Outside the feature loop so
+    # 791 polygons do not each re-scan 85 rows.
+    tooltip_domains = {f: field_domain(rows, f) for f in TOOLTIP_FIELDS}
     records = []
     for feature in features:
         geometry = feature.get("geometry") or {}
@@ -354,9 +385,15 @@ def decorate(
             None if row is None else to_float(row.get(field)), domain
         )
         record["__matched"] = row is not None
-        for choropleth in CHOROPLETH_FIELDS:
-            record["v_" + choropleth] = format_value(
-                None if row is None else to_float(row.get(choropleth))
+        # The `v_` keys are the tooltip's data, so they follow TOOLTIP_FIELDS --
+        # NOT CHOROPLETH_FIELDS, which only decides what you can colour by.  The
+        # template emits `{v_<field>}` for every TOOLTIP_FIELDS entry and nothing
+        # else, so these two lists must stay in step or an unresolved token
+        # renders as its own name (e.g. "v_2024_prop_r_for") in the tooltip.
+        for shown in TOOLTIP_FIELDS:
+            record["v_" + shown] = format_value(
+                None if row is None else to_float(row.get(shown)),
+                fraction=domain_is_share(tooltip_domains[shown]),
             )
         records.append(record)
     return records
@@ -431,6 +468,9 @@ def legend_html(domain: tuple[float, float] | None) -> str:
         )
     else:
         lo, hi = domain
+        # Same decision the tooltip makes, from the same range, so the two
+        # can never label one field's endpoints differently.
+        share = domain_is_share(domain)
         low = _css_rgba(color_scale(lo, domain))
         high = _css_rgba(color_scale(hi, domain))
         if lo == hi:
@@ -441,8 +481,8 @@ def legend_html(domain: tuple[float, float] | None) -> str:
         scale = (
             f'<div style="{row}justify-content:space-between;'
             f'width:{LEGEND_BAR_WIDTH}px;">'
-            f"<span>{_html_escape(format_value(lo))}</span>"
-            f"<span>{_html_escape(format_value(hi))}</span></div>"
+            f"<span>{_html_escape(format_value(lo, share))}</span>"
+            f"<span>{_html_escape(format_value(hi, share))}</span></div>"
             f"<div>{swatch}</div>"
         )
 
@@ -523,8 +563,10 @@ def build_deck(
         # `text`, not `html`: the frontend assigns `text` through innerText, so
         # precinct ids and labels arriving from the live layer cannot inject
         # markup.  Must be a dict -- pydeck defaults this to True, and Streamlit
-        # only ships the tooltip when it is a dict.
-        tooltip={"text": tooltip},
+        # only ships the tooltip when it is a dict.  pydeck leaves this
+        # parameter unannotated and defaults it to True, so type checkers
+        # infer `bool` and reject the dict Streamlit actually requires.
+        tooltip=cast("Any", {"text": tooltip}),
     )
 
 
@@ -579,7 +621,8 @@ def main() -> None:
         )
         field = next(f for f in CHOROPLETH_FIELDS if labels[f] == chosen)
         st.caption(
-            "Hover a precinct for all five metrics; click one for its "
+            f"Hover a precinct for all {len(TOOLTIP_FIELDS)} metrics; "
+            "click one for its "
             "demographics.  Precincts with no value for the chosen metric draw "
             "nothing, but stay hoverable and clickable."
         )
