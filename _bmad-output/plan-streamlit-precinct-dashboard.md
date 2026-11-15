@@ -3,7 +3,7 @@ title: 'Streamlit precinct choropleth dashboard'
 type: feature
 ticket: ''
 created: '2026-11-10'
-status: built
+status: done
 baseline_revision: '5b01f45'
 route: full
 route_source: auto
