@@ -43,7 +43,7 @@ FORCE_TEXT = {
 
 # Placeholder strings a human typed instead of a number.  They do not make a
 # numeric column textual; they are reported as a caveat on the numeric type.
-SENTINELS = {"N/A", "NA", "n/a", "n\A", "-", "--", "None", "null"}
+SENTINELS = {"N/A", "NA", "n/a", "n\\A", "-", "--", "None", "null"}
 
 MANUAL = {
     # --- union of the .ods sheets (data/raw/District {1,2,9} precincts.ods) ---
@@ -118,7 +118,7 @@ MANUAL = {
     "strong_no": (
         "integer",
         "Number of canvassed voters (i.e. those who answered the door) who indicated 'strong no' on Prop A",
-        "Strong No (Canvassed)",
+        "Total Strong No Responses",
     ),
     "2026_turnout": (
         "integer",
@@ -216,6 +216,15 @@ MANUAL = {
         "Prop A (City) Source Precinct Codes",
     ),
     # --- derived ---
+    "response_count": (
+        "integer",
+        "round(canvass_attempts * response_rate): estimated number of households "
+        "the canvass actually reached, i.e. responses rather than knocks. The "
+        "denominator of prop_a_city_no_canvassing_pct. Reads 0 where the response "
+        "rate is 0, which is a finding (nobody was reached), not missing data; "
+        "missing only where attempts or the response rate are not recorded.",
+        "Canvass Response Count",
+    ),
     "prop_a_city_no_canvassing_pct": (
         "number",
         "Percentage of canvassed voters (i.e. those who answered the door) who indicated 'strong no' on Prop A",
@@ -247,7 +256,7 @@ JOIN_NOTE = {
 # ---------------------------------------------------------------------------
 # READABLE_OVERRIDES -- the single source of truth for corrected labels.
 #
-# 58 of the 89 fields inherit `label` verbatim from the read-only Dallas Fair
+# 58 of the 90 fields inherit `label` verbatim from the read-only Dallas Fair
 # Districts export, and that export mangles them ('Pct nh white', 'Not us
 # citizen', 'Fb pct africa').  The fix belongs here, at the root, and is applied
 # *after* label selection so data/raw/ stays untouched and MANUAL stays readable
@@ -339,10 +348,12 @@ def classify(values):
         except ValueError:
             return None
 
-    nums = [num(v) for v in vals]
-    if all(n is not None for n in nums):
-        return "integer" if all(n.is_integer() for n in nums) else "number"
-    return "text"
+    # Collect the parsed values rather than testing the list with all(), so the
+    # elements are known floats (not `float | None`) wherever they are used.
+    nums = [n for n in (num(v) for v in vals) if n is not None]
+    if len(nums) != len(vals):
+        return "text"
+    return "integer" if all(n.is_integer() for n in nums) else "number"
 
 
 def reconcile(field, values, declared):
@@ -430,7 +441,10 @@ def main():
             label = dfs[f]["label"] or readable_from_name(f)
             description = dfs[f]["description"] + JOIN_NOTE.get(f, "")
         else:
-            declared = observed
+            # Nothing documents this field, so there is no upstream type to
+            # contradict: claim `text` rather than reading `observed`, which is
+            # only ever bound by a *previous* iteration of this loop.
+            declared = "text"
             label = readable_from_name(f)
             description = "Not documented -- add to MANUAL in build_data_dictionary.py."
             gaps.append(f)

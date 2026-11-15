@@ -17,8 +17,8 @@ Pipeline
    precinct number (one-to-many: a precinct covers several census VTDs), then
    onto the DFS export on ``census_vtd_geoid`` == ``source_ref``, then onto
    ``data/raw/detail.xlsx`` sheet 72 on the precinct number prefix; add
-   ``prop_a_city_no_canvassing_pct`` =
-   strong_no / round(canvass_attempts * response_rate) and
+   ``response_count`` = round(canvass_attempts * response_rate),
+   ``prop_a_city_no_canvassing_pct`` = strong_no / response_count,
    ``prop_a_city_no_actual_pct`` = Against total / Total votes cast and
    ``pct_renter_occupied`` = 1 - pct_owner_occupied.
 5. Collapse the joined output to one row per ``dallas_county_precinct_number``
@@ -83,7 +83,8 @@ PROP_A_GROUP_ROW = 2
 PROP_A_FIRST_DATA_ROW = 4
 PROP_A_KEY_PREFIX = 4        # join on the first four chars of `Precinct`
 SHARE_COL = "share_of_county_precinct"  # crosswalk: how much of the precinct this VTD covers
-NO_PCT_COL = "prop_a_city_no_canvassing_pct"   # no-rate of responders: strong_no / round(canvass_attempts * response_rate)
+RESPONSE_COUNT_COL = "response_count"  # estimated households reached: round(canvass_attempts * response_rate)
+NO_PCT_COL = "prop_a_city_no_canvassing_pct"   # no-rate of responders: strong_no / response_count
 NO_ACTUAL_PCT_COL = "prop_a_city_no_actual_pct"  # actual result: Against votes / Total votes
 RENTER_COL = "pct_renter_occupied"  # complement of the DFS owner-occupied share
 OUT = DATA / "precinct_data.csv"
@@ -330,8 +331,30 @@ def ratio(numerator_raw, denominator_raw):
     return fmt_number(round(numerator / denominator, 6))
 
 
+def response_count_value(attempts_raw, rate_raw):
+    """round(attempts * rate) as a whole-number count, or None when unrecorded.
+
+    How many households a precinct's canvass is estimated to have actually
+    reached: `canvass_attempts` is the doors knocked, and only `response_rate`
+    of those answered.  Unlike a share this is a COUNT, so a rounded product of
+    0 is a real finding -- a precinct with a 0 response rate reached nobody --
+    and is reported as 0 rather than left blank.  Blank means the source did not
+    record attempts or the response rate at all.
+    """
+    attempts, rate = as_number(attempts_raw), as_number(rate_raw)
+    if attempts is None or rate is None:
+        return None
+    return round(attempts * rate)
+
+
+def response_count(attempts_raw, rate_raw):
+    """`response_count_value` as text; blank only when an input is missing."""
+    count = response_count_value(attempts_raw, rate_raw)
+    return "" if count is None else fmt_number(count)
+
+
 def response_weighted_ratio(numerator_raw, attempts_raw, rate_raw):
-    """numerator / round(attempts * rate) as text.
+    """numerator / response_count as text.
 
     `strong_no` counts RESPONSES, so dividing it by canvass ATTEMPTS understates
     the no-rate of everyone who actually answered -- precincts with a low
@@ -339,19 +362,16 @@ def response_weighted_ratio(numerator_raw, attempts_raw, rate_raw):
     estimated number of responses, attempts x response_rate, rounded to a whole
     count.  Rounding is applied to the denominator only, never to the share.
 
-    Blank when any input is missing, and when the rounded denominator is 0: a
-    precinct whose responses round to none has no defined no-rate, so it reads
-    missing rather than 0 -- see the note on blanks in the module docstring.
-    Two precincts (4073, 2150) have a 0 response rate recorded and so drop out
-    of the populated count here; both had `strong_no` = 0, i.e. they carried
-    only ever a zero no-rate.
+    Blank when any input is missing, and when the response count rounds to 0: a
+    precinct that reached nobody has no defined no-rate, so it reads missing
+    rather than 0 -- see the note on blanks in the module docstring.  Two
+    precincts (4073, 2150) have a 0 response rate recorded and so drop out here;
+    both had `strong_no` = 0, i.e. they carried only ever a zero no-rate.  In
+    ``response_count`` those same two precincts read 0, not blank.
     """
     numerator = as_number(numerator_raw)
-    attempts, rate = as_number(attempts_raw), as_number(rate_raw)
-    if numerator is None or attempts is None or rate is None:
-        return ""
-    denominator = round(attempts * rate)
-    if denominator == 0:
+    denominator = response_count_value(attempts_raw, rate_raw)
+    if numerator is None or not denominator:  # missing, or 0 responses
         return ""
     return fmt_number(round(numerator / denominator, 6))
 
@@ -487,7 +507,7 @@ def main() -> None:
         [c for c in map_cols if c != "dallas_county_precinct_id"]
         + dfs_cols
         + prop_a_cols
-        + [NO_PCT_COL, NO_ACTUAL_PCT_COL, RENTER_COL]
+        + [RESPONSE_COUNT_COL, NO_PCT_COL, NO_ACTUAL_PCT_COL, RENTER_COL]
     )
     out_cols = (
         key_cols
@@ -505,6 +525,9 @@ def main() -> None:
             unmatched_prop.append(rec[PRECINCT_COL])
         derived = {
             **{c: "" for c in prop_a_cols},
+            RESPONSE_COUNT_COL: response_count(
+                rec.get("canvass_attempts"), rec.get("response_rate")
+            ),
             NO_PCT_COL: response_weighted_ratio(
                 rec.get("strong_no"), rec.get("canvass_attempts"), rec.get("response_rate")
             ),
@@ -530,6 +553,7 @@ def main() -> None:
             else:
                 merged.update(dfs)
             merged.update(pa)
+            merged[RESPONSE_COUNT_COL] = derived[RESPONSE_COUNT_COL]
             merged[NO_PCT_COL] = derived[NO_PCT_COL]
             merged[NO_ACTUAL_PCT_COL] = ratio(
                 merged.get("prop_a_city_against_total_votes"), merged.get("prop_a_city_total_votes")
@@ -577,7 +601,9 @@ def main() -> None:
     print(f"sheet 72 rows for this sheet         : {sum(int(v[PROP_A_ROW_COUNT_COL]) for v in prop_a.values())} across {len(prop_a)} precinct prefixes")
     print(f"union precincts missing from detail.xlsx sheet {PROP_A_SHEET}: {sorted(set(unmatched_prop))}")
     print(f"precincts whose prefix matched >1 sheet-72 row (values summed) : {fanned}")
-    for col in (NO_PCT_COL, NO_ACTUAL_PCT_COL, RENTER_COL):
+    for col in (RESPONSE_COUNT_COL, NO_PCT_COL, NO_ACTUAL_PCT_COL, RENTER_COL):
+        # A computed `response_count` of 0 is a finding, not an absence, so it
+        # counts as populated: `r.get(col)` is the string "0", which is truthy.
         print(f"rows with a computed {col}: {sum(1 for r in rows if r.get(col))} / {len(rows)}")
     print(f"precinct numbers in >1 sheet group   : {dups}")
     print(f"wrote {OUT}")

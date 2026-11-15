@@ -22,7 +22,7 @@ context:
 
 ## Intent
 
-**Problem:** The precinct research in `data/precinct_data.csv` is only inspectable as a flat 85-row, 89-column CSV. Organisers cannot see where canvass-based "no" share, response rate, and 2024 vote shares are geographically concentrated, or read a precinct's demographics alongside those numbers.
+**Problem:** The precinct research in `data/precinct_data.csv` is only inspectable as a flat 85-row, 90-column CSV. Organisers cannot see where canvass-based "no" share, response rate, and 2024 vote shares are geographically concentrated, or read a precinct's demographics alongside those numbers.
 
 **Approach:** A single Streamlit app that draws the county's 2026 election precincts as a pydeck choropleth, joins the CSV onto each polygon, and turns a clicked precinct into a demographic detail panel. Labels come from `data_dictionary.csv`.
 
@@ -78,9 +78,9 @@ context:
 
 ## Code Map
 
-- `data/precinct_data.csv` — 85 rows (deduplicated: `dallas_county_precinct_number` is unique), 89 cols. All 3 choropleth + 6 tooltip + 26 detail fields present as **strings**; blank is `""`. Fields starting with a digit (`2024_kamala`) are dict/DataFrame keys, never identifiers.
-- `data/data_dictionary.csv` — cols `field_name,data_type,description,readable_name`; 89 entries, covers every field needed. **Generated file**: committed content == output of `build_data_dictionary.py` for all 89 fields, so regenerating is a no-op until the labels are intentionally changed.
-- `build_data_dictionary.py` — the label source. 58 fields take `label` from `data/raw/dfs-export-precinct-20261108/dictionary.csv` (these are the ugly ones: `'Pct nh white'`); 31 are hand-authored in its `MANUAL` table with good labels. Its `readable_from_name()` fallback already title-cases. Apply the fix as a label override consumed after label selection, so the read-only DFS export is untouched. The 5 choropleth labels are already correct.
+- `data/precinct_data.csv` — 85 rows (deduplicated: `dallas_county_precinct_number` is unique), 90 cols. All 3 choropleth + 6 tooltip + 26 detail fields present as **strings**; blank is `""`. Fields starting with a digit (`2024_kamala`) are dict/DataFrame keys, never identifiers.
+- `data/data_dictionary.csv` — cols `field_name,data_type,description,readable_name`; 90 entries, covers every field needed. **Generated file**: committed content == output of `build_data_dictionary.py` for all 90 fields, so regenerating is a no-op until the labels are intentionally changed.
+- `build_data_dictionary.py` — the label source. 58 fields take `label` from `data/raw/dfs-export-precinct-20261108/dictionary.csv` (these are the ugly ones: `'Pct nh white'`); 32 are hand-authored in its `MANUAL` table with good labels. Its `readable_from_name()` fallback already title-cases. Apply the fix as a label override consumed after label selection, so the read-only DFS export is untouched. The 5 choropleth labels are already correct.
 - GIS layer (verified live) — `https://services3.arcgis.com/zqe2kwz79KUqUvxC/arcgis/rest/services/2025_Proposed_Election_Precincts_791/FeatureServer/0/query?where=1=1&outFields=*&returnGeometry=true&f=geojson` → 4.6 MB, 791 `Polygon` features, one ring each, `NewPrcnt` unique and non-blank on all 791, `maxRecordCount` 2000 so **one request needs no pagination**; warm fetch ~0.15 s. 84/85 CSV precincts match.
 - Per-field populated coverage on the 791 polygons — `prop_a_city_no_canvassing_pct` 24, `2024_prop_r_for` 63, `2024_prop_u_against` 63, `2024_kamala` 84, `response_rate` 25.
 - Blank detail fields: `median_age`, `median_household_income`, `not_us_citizen`, `pct_below_poverty`, `pct_english_only`, `pct_households_snap`, `pct_spanish`, `pct_us_born`, `population_per_sq_mi` have **no value in any row**, and are likewise empty (0/796) in the DFS source export — this app cannot populate them. The other 17 are populated in all 85 rows.
@@ -211,7 +211,7 @@ Keep the choropleth readable without the basemap: precincts that carry a value s
 - `uv sync` -- expected: resolves streamlit + pydeck + pandas, no conflict
 - `uv run python build_data_dictionary.py` -- expected: `rows in precinct_data.csv: 85`, `UNDOCUMENTED (fallback): []`, `blank-readable names: []`
 - `uv run python tests/test_dashboard.py` -- expected: exits 0 with a pass line per assertion
-- `uv run python -c "import dashboard; print(len(dashboard.load_rows()), len(dashboard.build_dictionary()))"` -- expected: `85 89`
+- `uv run python -c "import dashboard; print(len(dashboard.load_rows()), len(dashboard.build_dictionary()))"` -- expected: `85 90`
 - `uv run streamlit run dashboard.py --server.headless true & sleep 12; curl -s localhost:8501/_stcore/health` -- expected: `ok`, no traceback on stderr (`/healthz` serves the SPA HTML shell; `/_stcore/health` is the health endpoint in streamlit 1.67)
 - `uv run python -c "from streamlit import config; print(config.get_option('browser.gatherUsageStats'))"` -- expected: `False`
 

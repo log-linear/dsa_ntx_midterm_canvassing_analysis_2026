@@ -85,7 +85,9 @@ dirty = {
     if any(a in r["readable_name"] for a in ARTIFACTS)
 }
 assert not dirty, f"mangled labels remain: {dirty}"
-ok("all 89 labels free of 'Pct '/' nh '/' us ' artifacts")
+# The count is reported, not asserted: the check above covers whatever
+# dictionary.csv holds, so a new field cannot fail here for the wrong reason.
+ok("every label free of 'Pct '/' nh '/' us ' artifacts", f"{len(dictionary)} labels")
 
 # Decision 2b: every override in the generator must reach the CSV.  26 of the 54
 # corrections carry no artifact substring and are not worked examples, so without
