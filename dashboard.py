@@ -497,8 +497,8 @@ def legend_html(domain: tuple[float, float] | None) -> str:
         '<div style="display:flex;flex-direction:column;gap:4px;'
         'font-size:0.82rem;line-height:1.4;padding-top:2px;">'
         f"{scale}"
-        f'<div style="{row}padding-top:6px;">{empty}'
-        "<span>No value for this metric (precinct draws nothing)</span></div>"
+        # f'<div style="{row}padding-top:6px;">{empty}'
+        # "<span>No value for this metric (precinct draws nothing)</span></div>"
         "</div>"
     )
 
@@ -623,12 +623,12 @@ def main() -> None:
             index=CHOROPLETH_FIELDS.index(DEFAULT_CHOROPLETH),
         )
         field = next(f for f in CHOROPLETH_FIELDS if labels[f] == chosen)
-        st.caption(
-            f"Hover a precinct for all {len(TOOLTIP_FIELDS)} metrics; "
-            "click one for its "
-            "demographics.  Precincts with no value for the chosen metric draw "
-            "nothing, but stay hoverable and clickable."
-        )
+        # st.caption(
+        #     f"Hover a precinct for all {len(TOOLTIP_FIELDS)} metrics; "
+        #     "click one for its "
+        #     "demographics.  Precincts with no value for the chosen metric draw "
+        #     "nothing, but stay hoverable and clickable."
+        # )
 
     # The title names the metric actually on the map, so a screenshot or a
     # printed page carries it without the sidebar being visible.
@@ -664,22 +664,22 @@ def main() -> None:
 
     left, right = st.columns([3, 2])
     with left:
-        st.caption(
-            f"{colored} of {stats['polygons']} polygons are coloured by {labels[field]}; "
-            f"the remaining {stats['polygons'] - colored} carry no value for it and "
-            "draw nothing."
-        )
+        # st.caption(
+        #     f"{colored} of {stats['polygons']} polygons are coloured by {labels[field]}; "
+        #     f"the remaining {stats['polygons'] - colored} carry no value for it and "
+        #     "draw nothing."
+        # )
         missing = stats["unmatched"]
-        if missing:
-            st.caption(
-                f"Excluded, no polygon in the layer ({len(missing)}): "
-                + ", ".join(missing)
-            )
+        # if missing:
+        #     st.caption(
+        #         f"Excluded, no polygon in the layer ({len(missing)}): "
+        #         + ", ".join(missing)
+        #     )
     with right:
-        st.caption(
-            f"{stats['matched']} of {stats['csv_rows']} precincts in the research "
-            "extract matched a polygon."
-        )
+        # st.caption(
+        #     f"{stats['matched']} of {stats['csv_rows']} precincts in the research "
+        #     "extract matched a polygon."
+        # )
         clicked = selected_props(chart) if chart is not None else None
         if clicked is None:
             st.subheader("Precinct detail")
