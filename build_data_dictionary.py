@@ -8,8 +8,9 @@ Coverage strategy
    `label` -> readable_name, `description` -> description).  Those descriptions
    are written for the DFS profile, so a source note naming the joined key is
    appended where one exists.
-2. Fields created by this project (the .ods union, the VTD mapping, sheet 72 of
-   detail.xlsx, and the derived ratios) are described by hand in MANUAL below.
+2. Fields created by this project (the .ods union, the VTD mapping, the county
+   results roll-up precinct_comb.csv, and the derived ratios) are described by
+   hand in MANUAL below.
 3. data_type is *observed*, not declared: it is inferred from the values that
    actually appear in precinct_data.csv, so a column whose source calls itself a
    number but which carries text is reported honestly.  Columns listed in
@@ -36,7 +37,6 @@ FORCE_TEXT = {
     "census_vtd_geoid",
     "source_ref",
     "district",
-    "prop_a_city_precinct_code",
     "name",
     "geography_hierarchy",
 }
@@ -51,7 +51,7 @@ MANUAL = {
         "text",
         "Dallas County precinct number, from the unnamed first column of every "
         "sheet in the three district canvassing workbooks. Join key to the VTD "
-        "mapping and to the first four characters of sheet 72's `Precinct`.",
+        "mapping and, with the county, to the precinct results roll-up.",
         "Dallas County Precinct Number",
     ),
     "precinct_group": (
@@ -77,21 +77,23 @@ MANUAL = {
     "2024_prop_r_for": (
         "number",
         "Share of the 2024 vote on Proposition 14 (Prop R) cast FOR, as recorded in "
-        "the canvassing workbooks (fraction 0-1). Blank where the source sheet did "
-        "not record it, including every row whose values were column-shifted.",
+        "the county results roll-up (fraction 0-1). Blank where the precinct has no "
+        "Dallas row in that file, or where that row leaves the measure empty.",
         "2024 Prop R (For)",
     ),
     "2024_prop_u_against": (
         "number",
         "Share of the 2024 vote on Proposition 5 (Prop U) cast AGAINST, as recorded "
-        "in the canvassing workbooks (fraction 0-1). Blank where the source sheet "
-        "did not record it.",
+        "in the county results roll-up (fraction 0-1). Blank where the precinct has "
+        "no Dallas row in that file, or where that row leaves the measure empty.",
         "2024 Prop U (Against)",
     ),
     "2024_kamala": (
         "number",
         "Share of the 2024 presidential vote cast for Harris/Walz in this precinct, "
-        "as recorded in the canvassing workbooks (fraction 0-1).",
+        "as recorded in the county results roll-up (fraction 0-1). Blank where the "
+        "precinct has no Dallas row in that file, or where that row leaves the "
+        "measure empty.",
         "2024 Kamala Vote Share",
     ),
     "2024_turnout": (
@@ -171,50 +173,158 @@ MANUAL = {
         "in two districts.",
         "Share of County Precinct",
     ),
-    # --- data/raw/detail.xlsx, sheet '72' (City of Dallas Proposition A) ---
-    "prop_a_city_against_election_day": (
+    # --- data/raw/precinct_comb.csv (county results roll-up, official canvass) ---
+    # Three further measures from this file arrive under a field the canvass
+    # workbooks used to fill: see the .ods section above for 2024_kamala,
+    # 2024_prop_r_for and 2024_prop_u_against.
+    #
+    # These are 2020 Democratic PRIMARY figures, not the 2020 general election.
+    # Decisive: Bernie Sanders appears among the vote columns and he was not on
+    # the 2020 general ballot; the file names no Republican for 2020 at all; and
+    # each precinct's Biden+Sanders+Other total matches DFS
+    # president_2020_total_votes on 0 of 84 rows while running about a third of
+    # the 2024 presidential total.  This table also carries the general-election
+    # Democratic share as president_2020_dem_share (DFS), which for 4079 reads
+    # 0.7633 where 2020_percent_Biden reads 0.4537 -- the two disagree in 84 of
+    # 84 rows, so they are not interchangeable and each field names its contest.
+    "2020_votes_Biden": (
         "integer",
-        "Votes AGAINST City of Dallas Proposition A cast on election day (sheet 72 "
-        "column G), summed across the sheet's sub-precinct rows for this precinct.",
-        "Prop A (City) Against - Election Day",
+        "Votes cast for Joseph Biden in the 2020 Democratic presidential primary "
+        "in this precinct, as recorded in the county results roll-up. Blank where "
+        "the precinct has no Dallas row in that file, or where its Dallas row "
+        "leaves the measure empty.",
+        "2020 Primary Votes Biden",
     ),
-    "prop_a_city_against_ev_in_person": (
+    "2020_votes_Sanders": (
         "integer",
-        "Votes AGAINST City of Dallas Proposition A cast early in person (sheet 72 "
-        "column H).",
-        "Prop A (City) Against - Early In Person",
+        "Votes cast for Bernie Sanders in the 2020 Democratic presidential primary "
+        "in this precinct, as recorded in the county results roll-up. Blank where "
+        "the precinct has no Dallas row in that file, or where its Dallas row "
+        "leaves the measure empty.",
+        "2020 Primary Votes Sanders",
     ),
-    "prop_a_city_against_ev_mail": (
+    "2020_votes_Other": (
         "integer",
-        "Votes AGAINST City of Dallas Proposition A cast by mail during early voting "
-        "(sheet 72 column I).",
-        "Prop A (City) Against - Early Vote By Mail",
+        "Votes cast for the remaining candidates combined in the 2020 Democratic "
+        "presidential primary in this precinct, as recorded in the county results "
+        "roll-up. Blank where the precinct has no Dallas row in that file, or where "
+        "its Dallas row leaves the measure empty.",
+        "2020 Primary Votes Other",
     ),
-    "prop_a_city_against_total_votes": (
+    "2020_percent_Biden": (
+        "number",
+        "Share of this precinct's 2020 Democratic presidential primary vote cast "
+        "for Joseph Biden (fraction 0-1), as recorded in the county results "
+        "roll-up. A primary share, not the 2020 general-election figure in "
+        "president_2020_dem_share. Blank where the precinct has no Dallas row in "
+        "that file, or where its Dallas row leaves the measure empty.",
+        "2020 Primary Percent Biden",
+    ),
+    "2020_percent_Sanders": (
+        "number",
+        "Share of this precinct's 2020 Democratic presidential primary vote cast "
+        "for Bernie Sanders (fraction 0-1), as recorded in the county results "
+        "roll-up. A primary share, not the 2020 general-election figure in "
+        "president_2020_dem_share. Blank where the precinct has no Dallas row in "
+        "that file, or where its Dallas row leaves the measure empty.",
+        "2020 Primary Percent Sanders",
+    ),
+    "2020_percent_Other": (
+        "number",
+        "Share of this precinct's 2020 Democratic presidential primary vote cast "
+        "for the remaining candidates combined (fraction 0-1), as recorded in the "
+        "county results roll-up. A primary share, not the 2020 general-election "
+        "figure in president_2020_dem_share. Blank where the precinct has no Dallas "
+        "row in that file, or where its Dallas row leaves the measure empty.",
+        "2020 Primary Percent Other",
+    ),
+    "2024_votes_Harris": (
         "integer",
-        "Total votes AGAINST City of Dallas Proposition A (sheet 72 column J; equals "
-        "columns G+H+I on every row). Numerator of prop_a_city_no_actual_pct.",
-        "Prop A (City) Against - Total",
+        "Votes cast for Kamala Harris in the 2024 presidential election in this "
+        "precinct, as recorded in the county results roll-up. Blank where the "
+        "precinct has no Dallas row in that file, or where its Dallas row leaves "
+        "the measure empty.",
+        "2024 Votes Harris",
     ),
-    "prop_a_city_total_votes": (
+    "2024_votes_Trump": (
         "integer",
-        "Total votes cast on City of Dallas Proposition A, FOR and AGAINST combined "
-        "(sheet 72 column K). Note: the sheet's 'Against (En contra)' header spans "
-        "only G-J, so K is the ballot-question total, not an Against subtotal. "
-        "Denominator of prop_a_city_no_actual_pct.",
-        "Prop A (City) Total Votes",
+        "Votes cast for Donald Trump in the 2024 presidential election in this "
+        "precinct, as recorded in the county results roll-up. Blank where the "
+        "precinct has no Dallas row in that file, or where its Dallas row leaves "
+        "the measure empty.",
+        "2024 Votes Trump",
     ),
-    "prop_a_city_source_rows": (
+    "2024_votes_Other": (
         "integer",
-        "How many sheet-72 sub-precinct rows were summed into this precinct. '1' for "
-        "most; 1063 and 4086 have two.",
-        "Prop A (City) Source Row Count",
+        "Votes cast for all other candidates combined in the 2024 presidential "
+        "election in this precinct, as recorded in the county results roll-up. "
+        "Blank where the precinct has no Dallas row in that file, or where its "
+        "Dallas row leaves the measure empty.",
+        "2024 Votes Other",
     ),
-    "prop_a_city_precinct_code": (
-        "text",
-        "The sheet-72 `Precinct` code(s) that matched this precinct, pipe-separated "
-        "when more than one was summed (e.g. '1063-01|1063-03').",
-        "Prop A (City) Source Precinct Codes",
+    "2024_percent_Trump": (
+        "number",
+        "Share of the 2024 presidential vote cast for Donald Trump in this precinct "
+        "(fraction 0-1), as recorded in the county results roll-up. Blank where the "
+        "precinct has no Dallas row in that file, or where its Dallas row leaves "
+        "the measure empty.",
+        "2024 Percent Trump",
+    ),
+    "2024_percent_Other": (
+        "number",
+        "Share of the 2024 presidential vote cast for all other candidates combined "
+        "in this precinct (fraction 0-1), as recorded in the county results "
+        "roll-up. Blank where the precinct has no Dallas row in that file, or where "
+        "its Dallas row leaves the measure empty.",
+        "2024 Percent Other",
+    ),
+    "2024_votes_Against_R": (
+        "integer",
+        "Votes cast AGAINST Proposition 14 (Prop R) in this "
+        "precinct, as recorded in the county results roll-up. Blank where the "
+        "precinct has no Dallas row in that file, or where its Dallas row leaves "
+        "this measure empty.",
+        "2024 Votes Against Prop R",
+    ),
+    "2024_votes_Against_U": (
+        "integer",
+        "Votes cast AGAINST Proposition 5 (Prop U) in this "
+        "precinct, as recorded in the county results roll-up. Blank where the "
+        "precinct has no Dallas row in that file, or where its Dallas row leaves "
+        "this measure empty.",
+        "2024 Votes Against Prop U",
+    ),
+    "2024_votes_For_R": (
+        "integer",
+        "Votes cast FOR Proposition 14 (Prop R) in this "
+        "precinct, as recorded in the county results roll-up. Blank where the "
+        "precinct has no Dallas row in that file, or where its Dallas row leaves "
+        "this measure empty.",
+        "2024 Votes For Prop R",
+    ),
+    "2024_votes_For_U": (
+        "integer",
+        "Votes cast FOR Proposition 5 (Prop U) in this "
+        "precinct, as recorded in the county results roll-up. Blank where the "
+        "precinct has no Dallas row in that file, or where its Dallas row leaves "
+        "this measure empty.",
+        "2024 Votes For Prop U",
+    ),
+    "2024_percent_Against_R": (
+        "number",
+        "Share of the 2024 vote on Proposition 14 (Prop R) cast AGAINST in this precinct "
+        "(fraction 0-1), as recorded in the county results roll-up. Blank where the "
+        "precinct has no Dallas row in that file, or where its Dallas row leaves "
+        "this measure empty.",
+        "2024 Percent Against Prop R",
+    ),
+    "2024_percent_For_U": (
+        "number",
+        "Share of the 2024 vote on Proposition 5 (Prop U) cast FOR in this precinct (fraction "
+        "0-1), as recorded in the county results roll-up. Blank where the precinct "
+        "has no Dallas row in that file, or where its Dallas row leaves this "
+        "measure empty.",
+        "2024 Percent For Prop U",
     ),
     # --- derived ---
     "response_count": (
@@ -230,13 +340,6 @@ MANUAL = {
         "number",
         "Percentage of canvassed voters (i.e. those who answered the door) who indicated 'strong no' on Prop A",
         "Prop A No Share (Canvassed)",
-    ),
-    "prop_a_city_no_actual_pct": (
-        "number",
-        "prop_a_city_against_total_votes / prop_a_city_total_votes: the share who "
-        "actually voted against City of Dallas Proposition A. Blank for precincts with no "
-        "matching sheet-72 row (e.g. 1046).",
-        "Prop A No Share (Actual Result)",
     ),
     "pct_renter_occupied": (
         "number",
@@ -257,7 +360,7 @@ JOIN_NOTE = {
 # ---------------------------------------------------------------------------
 # READABLE_OVERRIDES -- the single source of truth for corrected labels.
 #
-# 58 of the 90 fields inherit `label` verbatim from the read-only Dallas Fair
+# 58 of the 99 fields inherit `label` verbatim from the read-only Dallas Fair
 # Districts export, and that export mangles them ('Pct nh white', 'Not us
 # citizen', 'Fb pct africa').  The fix belongs here, at the root, and is applied
 # *after* label selection so data/raw/ stays untouched and MANUAL stays readable

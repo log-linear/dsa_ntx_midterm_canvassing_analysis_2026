@@ -63,6 +63,9 @@ TOOLTIP_FIELDS = [
     "2024_prop_r_for",
     "2024_prop_u_against",
     "2024_kamala",
+    "2020_percent_Sanders",
+    "2020_percent_Biden",
+    "2020_percent_Other",
 ]
 DEFAULT_CHOROPLETH = "prop_a_city_no_canvassing_pct"
 

@@ -415,6 +415,191 @@ assert not missing, f"an accessor names a key the records do not carry: {missing
 ok("every @@= prop is a JSON expression over keys the records have")
 ok("Layer(id=...) is the id pydeck emits and the selection key", dashboard.LAYER_ID)
 
+# --- build-side join: data/raw/precinct_comb.csv, the county results roll-up --
+# These are rows of THIS plan's matrix, and they are build behaviour, not UI
+# behaviour -- so they are asserted on a real rebuild.  `main()` is run with its
+# output redirected to a temp file and the checked artifact is that file:
+# asserting on data/precinct_data.csv alone would pass against a stale artifact,
+# which is how the four shipped render defects got through.  Placed before the
+# AppTest section because the caption block at the end of this file is a known
+# failure that aborts the script: a check sitting after it never runs.
+import build_precinct_data as bpd  # noqa: E402
+import contextlib  # noqa: E402
+import csv  # noqa: E402
+import io  # noqa: E402
+import tempfile  # noqa: E402
+
+ROLLUP = list(csv.DictReader(open(BASE / "data/raw/precinct_comb.csv", newline="", encoding="utf-8")))
+MEASURE_COLS = [c for c in ROLLUP[0] if c not in (bpd.COMB_COUNTY_COL, bpd.COMB_KEY_COL)]
+JOINED_COLS = [bpd.COMB_OVERLAYS.get(c, c) for c in MEASURE_COLS]
+rollup_by_county = {}
+for _r in ROLLUP:
+    rollup_by_county.setdefault(_r[bpd.COMB_COUNTY_COL].strip(), {})[_r[bpd.COMB_KEY_COL].strip()] = _r
+dallas_rollup = rollup_by_county[bpd.COMB_COUNTY]
+
+with tempfile.TemporaryDirectory() as rebuild_dir:
+    _real_out, bpd.OUT = bpd.OUT, Path(rebuild_dir) / "precinct_data.csv"
+    _stdout = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(_stdout):
+            bpd.main()
+        rebuilt_bytes = bpd.OUT.read_bytes()
+        rebuilt = {r[bpd.PRECINCT_COL]: r for r in csv.DictReader(
+            open(bpd.OUT, newline="", encoding="utf-8"))}
+    finally:
+        bpd.OUT = _real_out
+build_report = _stdout.getvalue()
+
+assert rebuilt_bytes == (BASE / "data/precinct_data.csv").read_bytes(), \
+    "the committed extract is not what the current build produces"
+ok("committed extract reproduces from a fresh build", f"{len(rebuilt)} rows")
+
+# The dictionary half of the join gets the same treatment.  Reading
+# data/data_dictionary.csv off disk would only prove a string exists in whatever
+# file was written last -- the AGENTS.md ordering pitfall says the generator
+# "exits 0 on stale input; nothing checks the order", so the check that matters
+# is that the generator, run on THIS rebuild, produces the committed dictionary.
+with tempfile.TemporaryDirectory() as dict_dir:
+    _dict_in, _dict_out = Path(dict_dir) / "precinct_data.csv", Path(dict_dir) / "data_dictionary.csv"
+    _dict_in.write_bytes(rebuilt_bytes)
+    _real_in, _real_dict_out = (
+        build_data_dictionary.IN_CSV, build_data_dictionary.OUT)
+    try:
+        build_data_dictionary.IN_CSV, build_data_dictionary.OUT = _dict_in, _dict_out
+        with contextlib.redirect_stdout(io.StringIO()):
+            build_data_dictionary.main()
+        dict_bytes = _dict_out.read_bytes()
+        fresh_dict = {r["field_name"]: r for r in csv.DictReader(
+            open(_dict_out, newline="", encoding="utf-8"))}
+    finally:
+        build_data_dictionary.IN_CSV, build_data_dictionary.OUT = _real_in, _real_dict_out
+
+assert dict_bytes == (BASE / "data/data_dictionary.csv").read_bytes(), \
+    "the committed dictionary is not what the generator produces from the current extract"
+ok("committed dictionary regenerates from this rebuild (build order enforced)",
+   f"{len(fresh_dict)} fields")
+
+header = list(rebuilt[next(iter(rebuilt))].keys())
+RETIRED = ["prop_a_city_against_election_day", "prop_a_city_against_ev_in_person",
+           "prop_a_city_against_ev_mail", "prop_a_city_against_total_votes",
+           "prop_a_city_total_votes", "prop_a_city_source_rows",
+           "prop_a_city_precinct_code", "prop_a_city_no_actual_pct"]
+assert not [c for c in RETIRED if c in header], f"detail.xlsx fields survived: {RETIRED}"
+assert not [c for c in bpd.COMB_OVERLAYS if c in header], \
+    "an overlaid measure was also carried under its own name"
+# AC1 / AC7 shape, asserted rather than printed: 85 rows x 99 columns, and one
+# dictionary row per extract column with nothing falling through to the
+# UNDOCUMENTED branch.  Without this a further measure in precinct_comb.csv is
+# silently promoted into join_cols by comb_columns(), which returns every
+# non-key header column, and the count moves with no check to fail.
+assert len(header) == 99, header
+assert len(rebuilt) == 85, len(rebuilt)
+assert len(fresh_dict) == len(header) == 99, (len(fresh_dict), len(header))
+assert set(fresh_dict) == set(header), \
+    "dictionary and extract disagree on the field set"
+undocumented = sorted(f for f, r in fresh_dict.items() if "add to MANUAL" in r["description"])
+assert not undocumented, f"UNDOCUMENTED (fallback) not empty: {undocumented}"
+assert not [f for f, r in fresh_dict.items() if not r["readable_name"].strip()], \
+    "a field generated with a blank readable_name"
+# And the overlay targets must ARRIVE, not merely be written: `apply_comb` puts
+# three measures into names that come from the .ods union, and the writer is
+# opened with extrasaction="ignore", so a target missing from out_cols would
+# vanish silently -- the defect class where a value is proved built where the
+# consumer never receives it.
+missing_targets = sorted(set(bpd.COMB_OVERLAYS.values()) - set(header))
+assert not missing_targets, f"overlay targets never reached the extract: {missing_targets}"
+ok("sheet-72 fields gone; AC1/AC7 shape and overlay targets all present",
+   f"{len(header)} columns x {len(rebuilt)} rows")
+
+# Matrix "Normal precinct": every matched precinct carries all 20 measures
+# verbatim from its Dallas row -- compared cell by cell to the source, for all
+# 84, not sampled.  `..._percent_Harris` landing in `2024_kamala` is decision 1a.
+normal = [p for p in rebuilt if p in dallas_rollup]
+drift = [(p, src) for p in normal for src, tgt in zip(MEASURE_COLS, JOINED_COLS)
+         if rebuilt[p][tgt] != dallas_rollup[p][src].strip()]
+assert not drift, f"joined values disagree with the roll-up: {drift[:5]}"
+assert len(normal) == 84, len(normal)
+ok("matrix: 84 matched precincts carry all 20 measures verbatim", f"{len(drift)} mismatches")
+
+# Matrix "Precinct absent from source": 1046 has no Dallas row.  The row is
+# still emitted, its 20 result figures are blank, the canvass figures the .ods
+# supplied stay intact (including its genuine zero `canvass_attempts`), and the
+# build names it in its report rather than dropping it silently.
+assert "1046" in rebuilt, "a precinct with no roll-up row was dropped"
+gap = [c for c in JOINED_COLS if rebuilt["1046"][c] != ""]
+assert not gap, f"1046 result figures not blank: {gap}"
+assert rebuilt["1046"]["canvass_attempts"] == "0", rebuilt["1046"]["canvass_attempts"]
+assert rebuilt["1046"]["district"] == "District 9", rebuilt["1046"]["district"]
+_reported = [ln for ln in build_report.splitlines() if "missing from precinct_comb.csv" in ln]
+assert _reported and "1046" in _reported[0], _reported
+ok("matrix: 1046 blank across all 20, canvass intact, named in the report")
+
+# Matrix "Code in two counties": 2103 exists under Dallas AND Denton, and the
+# Denton row records Harris as 0.  A wrong-key join would show that 0.
+assert "2103" in rollup_by_county["Denton"], "fixture changed: 2103 no longer spans counties"
+assert rollup_by_county["Denton"]["2103"]["2024_percent_Harris"] == "0"
+assert rebuilt["2103"]["2024_kamala"] == dallas_rollup["2103"]["2024_percent_Harris"]
+assert rebuilt["2103"]["2024_kamala"] != "0", "the Denton row joined instead of the Dallas one"
+ok("matrix: 2103 joins the Dallas row, not the Denton row")
+
+# Matrix "Genuine zero": `0` is a value, so it must be written as `0`.  No
+# matched precinct happens to hold a zero today, so this drives the unit that
+# does the copying rather than trusting an absence in the current data.
+_zero_row = {}
+bpd.apply_comb(_zero_row, {"2024_percent_For_U": "0", "2020_votes_Biden": "0",
+                           "2024_percent_Harris": "0.5", "2024_votes_Trump": ""},
+               ["2024_percent_For_U", "2020_votes_Biden", "2024_percent_Harris", "2024_votes_Trump"])
+assert _zero_row["2024_percent_For_U"] == "0", _zero_row
+assert _zero_row["2020_votes_Biden"] == "0", _zero_row
+assert _zero_row["2024_kamala"] == "0.5", _zero_row  # overlaid onto the existing name
+assert _zero_row["2024_votes_Trump"] == "", _zero_row  # recorded blank stays blank
+assert "2024_percent_Harris" not in _zero_row, "overlay wrote its source name"
+ok("matrix: a genuine 0 is written as 0; a blank source stays blank")
+
+# Matrix "Zero-vs-blank among our 84": the only empty cell in each of the 20
+# joined fields is 1046, and no matched precinct holds a zero -- which is why
+# the generator reports the gap as a row count, per field, from reconcile().
+for _c in JOINED_COLS:
+    _empties = [p for p in rebuilt if rebuilt[p][_c] == ""]
+    assert _empties == ["1046"], f"{_c}: unexpected empty rows {_empties}"
+    assert not [p for p in normal if rebuilt[p][_c].strip() == "0"], f"{_c}: unexpected zero"
+    assert "1 of 85 rows empty" in dictionary[_c]["description"], _c
+ok("matrix: 1046 alone is empty in all 20 fields, reported as 1 of 85 rows", f"{len(JOINED_COLS)} fields")
+
+
+def aborts_when_rollup_is(bad_csv, expect_substring):
+    """Run the build with the roll-up replaced; prove it aborted before writing."""
+    _csv, _out, wrote = bpd.COMB_CSV, bpd.OUT, []
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            out_path = Path(td) / "precinct_data.csv"
+            bpd.COMB_CSV, bpd.OUT = Path(bad_csv), out_path
+            err = expect_raises(SystemExit, bpd.main)
+            if out_path.exists():
+                wrote.append(out_path.name)
+    finally:
+        bpd.COMB_CSV, bpd.OUT = _csv, _out
+    assert not wrote, "the build wrote precinct_data.csv despite the unusable roll-up"
+    assert expect_substring in str(err), (expect_substring, str(err))
+    return err
+
+
+# Matrix "Source missing / header-only": the roll-up is a required input, so the
+# build aborts with a SystemExit naming the path, BEFORE the output is opened.
+with tempfile.TemporaryDirectory() as guard_dir:
+    _header_only = Path(guard_dir) / "header_only.csv"
+    _header_only.write_text(",".join(ROLLUP[0].keys()) + "\n", encoding="utf-8")
+    _no_dallas = Path(guard_dir) / "no_dallas.csv"
+    _no_dallas.write_text(
+        ",".join(ROLLUP[0].keys()) + "\n" + ",".join(
+            ["Collin", "9999"] + [""] * (len(MEASURE_COLS))
+        ) + "\n", encoding="utf-8")
+    _err = aborts_when_rollup_is(Path(guard_dir) / "absent.csv", "missing required input")
+    assert "absent.csv" in str(_err), _err
+    aborts_when_rollup_is(_header_only, "no data rows")
+    aborts_when_rollup_is(_no_dallas, f"no `{bpd.COMB_COUNTY_COL} == {bpd.COMB_COUNTY}` rows")
+ok("matrix: missing / header-only / no-Dallas roll-up aborts before writing")
+
 # Use Streamlit's real event-state types, not a hand-rolled double nesting:
 # main() hands selected_props the PydeckState that st.pydeck_chart returns, and a
 # mock that adds an extra `.selection` layer is what let the old off-by-one read

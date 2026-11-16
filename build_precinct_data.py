@@ -15,12 +15,20 @@ Pipeline
 4. Collapse the union to one row per precinct (keeping the row with the most
    data), then LEFT JOIN it onto ``data/raw/dallas_vtd_to_county_precinct.csv`` on the
    precinct number (one-to-many: a precinct covers several census VTDs), then
-   onto the DFS export on ``census_vtd_geoid`` == ``source_ref``, then onto
-   ``data/raw/detail.xlsx`` sheet 72 on the precinct number prefix; add
+   onto the DFS export on ``census_vtd_geoid`` == ``source_ref``; add
    ``response_count`` = round(canvass_attempts * response_rate),
-   ``prop_a_city_no_canvassing_pct`` = strong_no / response_count,
-   ``prop_a_city_no_actual_pct`` = Against total / Total votes cast and
+   ``prop_a_city_no_canvassing_pct`` = strong_no / response_count and
    ``pct_renter_occupied`` = 1 - pct_owner_occupied.
+   The county results roll-up ``data/raw/precinct_comb.csv`` joins on
+   ``county == "Dallas"`` plus the precinct code compared as TEXT -- and it joins
+   only AFTER step 5 has collapsed the table to one row per precinct, never
+   among the joins above.  Its 20 measures therefore cannot influence how a raw
+   ``.ods`` row was type-checked, alignment-repaired, or scored for fullness,
+   which is what decides which row survives step 5.
+   Three of those measures supersede a share the canvass workbooks used to
+   supply: ``2024_kamala``, ``2024_prop_r_for`` and ``2024_prop_u_against`` keep
+   their names and take the official county figure, and go blank where the
+   precinct has no Dallas row in the roll-up.
 5. Collapse the joined output to one row per ``dallas_county_precinct_number``
    (see ONE ROW PER PRECINCT).  The VTD fan-out produced several rows per
    precinct with repeated precinct-level values; the joined output keeps the
@@ -51,17 +59,10 @@ Percentage cells are written as their stored fractions (0.6736 == "67.36%").
 
 import csv
 import re
-from typing import Any
-import warnings
 import zipfile
 import xml.etree.ElementTree as ET
 from collections import OrderedDict
 from pathlib import Path
-
-import openpyxl
-from openpyxl.utils import column_index_from_string
-
-warnings.filterwarnings("ignore", message="Workbook contains no default style")
 
 TABLE = "{urn:oasis:names:tc:opendocument:xmlns:table:1.0}"
 OFFICE = "{urn:oasis:names:tc:opendocument:xmlns:office:1.0}"
@@ -76,16 +77,13 @@ RAW = DATA / "raw"               # every input lives here; DATA holds only outpu
 ODS_FILES = sorted(RAW.glob("*.ods"))
 VTD_MAP = RAW / "dallas_vtd_to_county_precinct.csv"
 DFS_CSV = RAW / "dfs-export-precinct-20261108" / "data.csv"
-PROP_A_XLSX = RAW / "detail.xlsx"
-PROP_A_SHEET = "72"          # City of Dallas Proposition A (Vote for 1)
-PROP_A_HEADER_ROW = 3        # row 2 holds the merged For/Against group labels
-PROP_A_GROUP_ROW = 2
-PROP_A_FIRST_DATA_ROW = 4
-PROP_A_KEY_PREFIX = 4        # join on the first four chars of `Precinct`
+COMB_CSV = RAW / "precinct_comb.csv"  # county results roll-up, one row per (county, precinct)
+COMB_COUNTY = "Dallas"   # the only county whose rows this build joins
+COMB_COUNTY_COL = "county"
+COMB_KEY_COL = "precinct"
 SHARE_COL = "share_of_county_precinct"  # crosswalk: how much of the precinct this VTD covers
 RESPONSE_COUNT_COL = "response_count"  # estimated households reached: round(canvass_attempts * response_rate)
 NO_PCT_COL = "prop_a_city_no_canvassing_pct"   # no-rate of responders: strong_no / response_count
-NO_ACTUAL_PCT_COL = "prop_a_city_no_actual_pct"  # actual result: Against votes / Total votes
 RENTER_COL = "pct_renter_occupied"  # complement of the DFS owner-occupied share
 OUT = DATA / "precinct_data.csv"
 
@@ -109,19 +107,17 @@ EXPECTED_TYPE = {
 }
 MAX_SHIFT = 1  # the only observed mis-alignment is one column left
 
-# Sheet 72 column letters -> output names.  The merged group label
-# `Against (En Contra)` actually spans G2:J2; column K is labelled `Total` and
-# holds each precinct's grand total (For + Against).  It is kept because the
-# request named G-K, but it is named as a total rather than an Against figure.
-PROP_A_COLS = [
-    ("G", "prop_a_city_against_election_day"),
-    ("H", "prop_a_city_against_ev_in_person"),
-    ("I", "prop_a_city_against_ev_mail"),
-    ("J", "prop_a_city_against_total_votes"),
-    ("K", "prop_a_city_total_votes"),
-]
-PROP_A_ROW_COUNT_COL = "prop_a_city_source_rows"
-PROP_A_CODES_COL = "prop_a_city_precinct_code"
+# The roll-up's 20 measures, in source order.  Three of them arrive under an
+# existing field name instead of their own (decision 1a): the .ods canvass
+# workbooks used to supply these shares, and the official county result
+# supersedes them while the name, its label and the dashboard code naming it
+# all stay put.  A source column consumed this way is not also carried under
+# its own name, so 3 of the 20 fold in and 17 arrive as new columns.
+COMB_OVERLAYS = {
+    "2024_percent_Harris": "2024_kamala",
+    "2024_percent_For_R": "2024_prop_r_for",
+    "2024_percent_Against_U": "2024_prop_u_against",
+}
 
 
 
@@ -251,7 +247,7 @@ def load_csv(path: Path):
 
 
 def as_number(value):
-    """Numeric value of a cell: xlsx gives ints, the .ods union gives strings."""
+    """Numeric value of a cell: the .ods union gives strings, CSVs give text."""
     if isinstance(value, bool) or value is None:
         return None
     if isinstance(value, (int, float)):
@@ -269,50 +265,82 @@ def fmt_number(num):
     return str(int(num)) if float(num).is_integer() else str(num)
 
 
-def load_prop_a():
-    """Aggregate sheet 72 (City of Dallas Proposition A) by precinct prefix.
+def load_comb():
+    """Index the county results roll-up by precinct code, Dallas rows only.
 
-    Keys look like `1063-01`, so joining on the first four characters can match
-    more than one sheet row (sub-precincts).  Vote counts are summed per prefix
-    and the contributing codes are reported, so the fan-out is auditable rather
-    than silently dropped or duplicated.
+    The key is `(county, precinct)` compared as TEXT with only surrounding
+    whitespace stripped: the file carries codes such as `0024` and `30C4` that
+    int-casting would destroy, and precinct `2103` exists under both Dallas and
+    Denton, so the county is part of the key rather than a filter applied later.
+
+    Values are carried across as the source wrote them: whitespace-stripped only,
+    never re-parsed, re-formatted or rounded, so the roll-up's own precision
+    survives into the extract.  A `0` is a value and stays `0`; only a precinct
+    with no Dallas row is absent from the index, which is what makes its figures
+    read blank rather than zero.
+
+    The roll-up is a required input, so a missing file, a header-only file or a
+    file with no Dallas row aborts the build before anything is written.
     """
-    ws = openpyxl.load_workbook(PROP_A_XLSX)[PROP_A_SHEET]
-    against = next(
-        (
-            m
-            for m in ws.merged_cells.ranges
-            if "against" in str(ws.cell(m.min_row, m.min_col).value or "").lower()
-        ),
-        None,
-    )
-    span = list(range(against.min_col, against.max_col + 1)) if against else []
-    if span != [column_index_from_string(l) for l, _ in PROP_A_COLS[:4]]:
-        print(f"  note: 'Against (En Contra)' spans {against}; requested range was G-K")
+    if not COMB_CSV.exists():
+        raise SystemExit(f"missing required input: {COMB_CSV}")
+    rows, cols = load_csv(COMB_CSV)
+    for needed in (COMB_COUNTY_COL, COMB_KEY_COL):
+        if needed not in cols:
+            raise SystemExit(f"{COMB_CSV} has no `{needed}` column; header is {cols}")
+    measures = [c for c in cols if c not in (COMB_COUNTY_COL, COMB_KEY_COL)]
+    if not measures:
+        raise SystemExit(f"{COMB_CSV} holds no result measures, only its key columns")
+    unknown = [s for s in COMB_OVERLAYS if s not in measures]
+    if unknown:
+        raise SystemExit(f"{COMB_CSV} is missing overlaid columns {unknown}")
 
-    grouped: "OrderedDict[str, list[tuple[str, tuple[Any, ...]]]]" = OrderedDict()
-    for row in ws.iter_rows(min_row=PROP_A_FIRST_DATA_ROW):
-        key = row[0].value
-        if key in (None, ""):
+    by_precinct: "dict[str, dict[str, str]]" = {}
+    clashes: "list[str]" = []
+    for r in rows:
+        if (r.get(COMB_COUNTY_COL) or "").strip() != COMB_COUNTY:
+            continue  # another county's precinct: never joins onto ours
+        code = (r.get(COMB_KEY_COL) or "").strip()
+        if not code:
             continue
-        code = str(key).strip()
-        if not re.match(r"^[0-9A-Za-z]{4}-", code):
-            continue  # the sheet's trailing `Total:` row
-        grouped.setdefault(code[:PROP_A_KEY_PREFIX], []).append((code, row))
+        if code in by_precinct:
+            clashes.append(code)
+            continue  # first row wins, so the result stays reproducible
+        by_precinct[code] = r
+    if not rows:
+        raise SystemExit(f"{COMB_CSV} has a header but no data rows")
+    if not by_precinct:
+        raise SystemExit(f"{COMB_CSV} has no `{COMB_COUNTY_COL} == {COMB_COUNTY}` rows")
+    if clashes:
+        print(f"  note: {COMB_COUNTY} precinct codes repeated in {COMB_CSV.name}"
+              f" (first row kept): {sorted(set(clashes))}")
+    return by_precinct, measures, len(rows)
 
-    records: "dict[str, dict[str, str]]" = {}
-    for prefix, entries in grouped.items():
-        rec: "dict[str, str]" = {}
-        for letter, name in PROP_A_COLS:
-            idx = column_index_from_string(letter) - 1
-            nums = [as_number(row[idx].value) for _, row in entries]
-            nums = [n for n in nums if n is not None]
-            rec[name] = fmt_number(sum(nums)) if nums else ""
-        rec[PROP_A_ROW_COUNT_COL] = str(len(entries))
-        rec[PROP_A_CODES_COL] = "|".join(code for code, _ in entries)
-        records[prefix] = rec
-    columns = [n for _, n in PROP_A_COLS] + [PROP_A_ROW_COUNT_COL, PROP_A_CODES_COL]
-    return records, columns
+
+def comb_columns(measures):
+    """Output names the roll-up supplies: the 17 new columns, in source order.
+
+    A measure consumed by an overlay (decision 1a) is deliberately not also
+    carried under its own name, so it drops out here and appears only as the
+    existing field it supersedes.
+    """
+    return [m for m in measures if m not in COMB_OVERLAYS]
+
+
+def apply_comb(row, source, measures):
+    """Copy the roll-up's measures onto an assembled precinct row, in place.
+
+    Runs after the .ods union, the alignment repair and both dedupes, so the
+    official county figures never influence how raw workbook rows were scored or
+    repaired -- `EXPECTED_TYPE` still describes the raw `.ods` cells.  A precinct
+    with no Dallas row (`source` None) gets blanks across all 20 figures; a
+    measure the matched row leaves empty stays empty, since the source recorded
+    nothing for it.
+    """
+    for m in measures:
+        target = COMB_OVERLAYS.get(m, m)
+        row[target] = source.get(m, "").strip() if source else ""
+    return row
 
 
 def complement(value_raw):
@@ -376,9 +404,13 @@ def response_weighted_ratio(numerator_raw, attempts_raw, rate_raw):
     return fmt_number(round(numerator / denominator, 6))
 
 
-# Two independent "Prop A No" shares per precinct:
-#   NO_PCT_COL         canvassing proxy  -- strong_no / round(canvass_attempts * response_rate)
-#   NO_ACTUAL_PCT_COL  actual result     -- Against total / Total votes cast
+# The canvassing proxy for a precinct's "Prop A No" share:
+#   NO_PCT_COL   strong_no / round(canvass_attempts * response_rate)
+# The actual result is no longer computed here: the roll-up supplies the county's
+# Against/For shares directly, so `ratio()` has no caller left.  It is kept
+# deliberately -- this build's own Against-divided-by-ballots-cast measure was
+# retired with detail.xlsx, and the roll-up's per-ballot-question shares are not
+# the same figure, so nothing here reproduces it.
 
 
 def fullness(rec: "dict[str, str]", columns: "list[str]", skip: "tuple[str, ...]" = ()) -> int:
@@ -495,7 +527,8 @@ def main() -> None:
 
     map_rows, map_cols = load_csv(VTD_MAP)
     dfs_rows, dfs_cols = load_csv(DFS_CSV)
-    prop_a, prop_a_cols = load_prop_a()
+    comb, comb_measures, comb_rows = load_comb()
+    comb_cols = comb_columns(comb_measures)
 
     by_precinct: "dict[str, list[dict[str, str]]]" = {}
     for r in map_rows:
@@ -506,8 +539,8 @@ def main() -> None:
     join_cols = (
         [c for c in map_cols if c != "dallas_county_precinct_id"]
         + dfs_cols
-        + prop_a_cols
-        + [RESPONSE_COUNT_COL, NO_PCT_COL, NO_ACTUAL_PCT_COL, RENTER_COL]
+        + comb_cols
+        + [RESPONSE_COUNT_COL, NO_PCT_COL, RENTER_COL]
     )
     out_cols = (
         key_cols
@@ -516,30 +549,20 @@ def main() -> None:
         + join_cols
     )
 
-    rows, unmatched_vtd, unmatched_dfs, unmatched_prop = [], [], [], []
+    rows, unmatched_vtd, unmatched_dfs = [], [], []
     for rec in union:
-        # Precinct-level figures from detail.xlsx, keyed on the precinct number
-        # (the first four characters of that sheet's `Precinct` column).
-        pa = prop_a.get(rec[PRECINCT_COL], {})
-        if not pa:
-            unmatched_prop.append(rec[PRECINCT_COL])
         derived = {
-            **{c: "" for c in prop_a_cols},
             RESPONSE_COUNT_COL: response_count(
                 rec.get("canvass_attempts"), rec.get("response_rate")
             ),
             NO_PCT_COL: response_weighted_ratio(
                 rec.get("strong_no"), rec.get("canvass_attempts"), rec.get("response_rate")
             ),
-            NO_ACTUAL_PCT_COL: "",
             RENTER_COL: "",
         }
         matches = by_precinct.get(rec[PRECINCT_COL])
         if not matches:  # keep the union row even if unmapped
             row = {**rec, **derived, **{c: "" for c in map_cols + dfs_cols}}
-            row[NO_ACTUAL_PCT_COL] = ratio(
-                row.get("prop_a_city_against_total_votes"), row.get("prop_a_city_total_votes")
-            )
             row[RENTER_COL] = complement(row.get("pct_owner_occupied"))
             rows.append(row)
             unmatched_vtd.append(rec[PRECINCT_COL])
@@ -552,18 +575,25 @@ def main() -> None:
                 merged.update({c: "" for c in dfs_cols})
             else:
                 merged.update(dfs)
-            merged.update(pa)
             merged[RESPONSE_COUNT_COL] = derived[RESPONSE_COUNT_COL]
             merged[NO_PCT_COL] = derived[NO_PCT_COL]
-            merged[NO_ACTUAL_PCT_COL] = ratio(
-                merged.get("prop_a_city_against_total_votes"), merged.get("prop_a_city_total_votes")
-            )
             merged[RENTER_COL] = complement(merged.get("pct_owner_occupied"))
             rows.append(merged)
 
     # One row per precinct: the VTD fan-out above is a join artifact, not data.
     fanout_rows = len(rows)
     rows, dropped_vtd = dedupe_output_by_precinct(rows, out_cols)
+
+    # Election results join last: the roll-up supersedes the canvass workbooks'
+    # shares, and must not influence how raw .ods rows were type-checked,
+    # alignment-repaired, or scored for fullness above.
+    unmatched_comb = []
+    for row in rows:
+        code = (row.get(PRECINCT_COL) or "").strip()
+        source = comb.get(code)
+        if source is None:
+            unmatched_comb.append(code)
+        apply_comb(row, source, comb_measures)
 
     with open(OUT, "w", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=out_cols, extrasaction="ignore")
@@ -590,18 +620,14 @@ def main() -> None:
     print(f"rows repaired for alignment ({len(repaired)}):")
     for r in repaired:
         print(f"    {r}")
-    union_keys = {r[PRECINCT_COL] for r in union}
-    fanned = {
-        p: v[PROP_A_CODES_COL]
-        for p, v in prop_a.items()
-        if p in union_keys and v[PROP_A_ROW_COUNT_COL] != "1"
-    }
+    union_keys = {r[PRECINCT_COL].strip() for r in union}
+    matched_comb = sorted(union_keys & set(comb))
     print(f"union precincts missing from VTD map : {sorted(set(unmatched_vtd))}")
     print(f"VTD geoids missing from DFS export   : {sorted(set(unmatched_dfs))}")
-    print(f"sheet 72 rows for this sheet         : {sum(int(v[PROP_A_ROW_COUNT_COL]) for v in prop_a.values())} across {len(prop_a)} precinct prefixes")
-    print(f"union precincts missing from detail.xlsx sheet {PROP_A_SHEET}: {sorted(set(unmatched_prop))}")
-    print(f"precincts whose prefix matched >1 sheet-72 row (values summed) : {fanned}")
-    for col in (RESPONSE_COUNT_COL, NO_PCT_COL, NO_ACTUAL_PCT_COL, RENTER_COL):
+    print(f"roll-up rows                         : {comb_rows} total, {len(comb)} {COMB_COUNTY},"
+          f" {len(matched_comb)} of {len(union_keys)} union precincts matched")
+    print(f"union precincts missing from {COMB_CSV.name}: {sorted(set(unmatched_comb))}")
+    for col in (RESPONSE_COUNT_COL, NO_PCT_COL, RENTER_COL):
         # A computed `response_count` of 0 is a finding, not an absence, so it
         # counts as populated: `r.get(col)` is the string "0", which is truthy.
         print(f"rows with a computed {col}: {sum(1 for r in rows if r.get(col))} / {len(rows)}")
