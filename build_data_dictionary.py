@@ -105,8 +105,11 @@ MANUAL = {
     ),
     "2026_registered": (
         "integer",
-        "Registered voters in the precinct as recorded for the 2026 canvass.",
-        "2026 Registered Voters",
+        "Registered voters in the precinct as recorded in the canvassing "
+        "workbooks ahead of the 2026 canvass. A canvass-period figure, not the "
+        "official general-election count, which is carried separately as "
+        "2026_registered_general; the two are not interchangeable.",
+        "2026 Registered Voters (Canvass)",
     ),
     "canvass_attempts": (
         "integer",
@@ -122,26 +125,6 @@ MANUAL = {
         "integer",
         "Number of canvassed voters (i.e. those who answered the door) who indicated 'strong no' on Prop A",
         "Total Strong No Responses",
-    ),
-    "2026_turnout": (
-        "integer",
-        "Turnout recorded for the 2026 election in the canvassing workbooks.",
-        "2026 Turnout",
-    ),
-    "2026_bond": (
-        "integer",
-        "2026 bond measure votes recorded in the canvassing workbooks.",
-        "2026 Bond Votes",
-    ),
-    "2026_talarico": (
-        "integer",
-        "2026 Talarico votes recorded in the canvassing workbooks.",
-        "2026 Talarico Votes",
-    ),
-    "2026_hinojosa": (
-        "integer",
-        "2026 Hinojosa votes recorded in the canvassing workbooks.",
-        "2026 Hinojosa Votes",
     ),
     "source_file": (
         "text",
@@ -325,6 +308,185 @@ MANUAL = {
         "has no Dallas row in that file, or where its Dallas row leaves this "
         "measure empty.",
         "2024 Percent For Prop U",
+    ),
+    # --- 2026 general election: data/raw/2026_governor_general_precinct.csv,
+    # 2026_senate_general_precinct.csv and 2026_props_general_precinct.csv,
+    # joined on the precinct code carried in their `new_precinct` key
+    # (`113:<code>`).  Measures are namespaced by contest because `votes_Other`
+    # appears in both race files and `votes_For` in both proposition rows.
+    # Blank means the file holds no row for the precinct, or its row leaves the
+    # measure empty; a recorded 0 is carried as 0.  Shares are fractions 0-1.
+    "2026_gov_votes_Abbott": (
+        "integer",
+        "Votes cast for Abbott in the 2026 general election for governor in this "
+        "precinct. Blank where the precinct has no row in "
+        "`2026_governor_general_precinct.csv`.",
+        "2026 Governor Votes Abbott",
+    ),
+    "2026_gov_votes_Hinojosa": (
+        "integer",
+        "Votes cast for Hinojosa in the 2026 general election for governor in this "
+        "precinct. Blank where the precinct has no row in "
+        "`2026_governor_general_precinct.csv`.",
+        "2026 Governor Votes Hinojosa",
+    ),
+    "2026_gov_votes_Other": (
+        "integer",
+        "Votes cast for all other candidates combined in the 2026 general election "
+        "for governor in this precinct. Blank where the precinct has no row in "
+        "`2026_governor_general_precinct.csv`.",
+        "2026 Governor Votes Other",
+    ),
+    "2026_gov_percent_Abbott": (
+        "number",
+        "Share of this precinct's 2026 general governor vote cast for Abbott "
+        "(fraction 0-1). Blank where the precinct has no row in "
+        "`2026_governor_general_precinct.csv`.",
+        "2026 Governor Percent Abbott",
+    ),
+    "2026_gov_percent_Hinojosa": (
+        "number",
+        "Share of this precinct's 2026 general governor vote cast for Hinojosa "
+        "(fraction 0-1). Blank where the precinct has no row in "
+        "`2026_governor_general_precinct.csv`.",
+        "2026 Governor Percent Hinojosa",
+    ),
+    "2026_gov_percent_Other": (
+        "number",
+        "Share of this precinct's 2026 general governor vote cast for all other "
+        "candidates combined (fraction 0-1). Blank where the precinct has no row in "
+        "`2026_governor_general_precinct.csv`.",
+        "2026 Governor Percent Other",
+    ),
+    "2026_gov_percent_Turnout": (
+        "number",
+        "Share of this precinct's registered voters who voted on the governor ballot "
+        "in the 2026 general election (fraction 0-1). Blank where the precinct has no "
+        "row in `2026_governor_general_precinct.csv`.",
+        "2026 Governor Turnout Share",
+    ),
+    "2026_sen_votes_Paxton": (
+        "integer",
+        "Votes cast for Paxton in the 2026 general election for Senate in this "
+        "precinct. Blank where the precinct has no row in "
+        "`2026_senate_general_precinct.csv`.",
+        "2026 Senate Votes Paxton",
+    ),
+    "2026_sen_votes_Talarico": (
+        "integer",
+        "Votes cast for Talarico in the 2026 general election for Senate in this "
+        "precinct. Blank where the precinct has no row in "
+        "`2026_senate_general_precinct.csv`.",
+        "2026 Senate Votes Talarico",
+    ),
+    "2026_sen_votes_Other": (
+        "integer",
+        "Votes cast for all other candidates combined in the 2026 general election "
+        "for Senate in this precinct. Blank where the precinct has no row in "
+        "`2026_senate_general_precinct.csv`.",
+        "2026 Senate Votes Other",
+    ),
+    "2026_sen_percent_Paxton": (
+        "number",
+        "Share of this precinct's 2026 general Senate vote cast for Paxton (fraction "
+        "0-1). Blank where the precinct has no row in "
+        "`2026_senate_general_precinct.csv`.",
+        "2026 Senate Percent Paxton",
+    ),
+    "2026_sen_percent_Talarico": (
+        "number",
+        "Share of this precinct's 2026 general Senate vote cast for Talarico "
+        "(fraction 0-1). Blank where the precinct has no row in "
+        "`2026_senate_general_precinct.csv`.",
+        "2026 Senate Percent Talarico",
+    ),
+    "2026_sen_percent_Other": (
+        "number",
+        "Share of this precinct's 2026 general Senate vote cast for all other "
+        "candidates combined (fraction 0-1). Blank where the precinct has no row in "
+        "`2026_senate_general_precinct.csv`.",
+        "2026 Senate Percent Other",
+    ),
+    "2026_sen_percent_Turnout": (
+        "number",
+        "Share of this precinct's registered voters who voted on the Senate ballot in "
+        "the 2026 general election (fraction 0-1). Blank where the precinct has no "
+        "row in `2026_senate_general_precinct.csv`.",
+        "2026 Senate Turnout Share",
+    ),
+    "2026_prop_city_votes_For": (
+        "integer",
+        "Votes cast FOR the 2026 city proposition in this precinct. Blank where the "
+        "precinct has no `city` row in `2026_props_general_precinct.csv`.",
+        "2026 Prop City (For) Votes",
+    ),
+    "2026_prop_city_votes_Against": (
+        "integer",
+        "Votes cast AGAINST the 2026 city proposition in this precinct. Blank where "
+        "the precinct has no `city` row in `2026_props_general_precinct.csv`.",
+        "2026 Prop City (Against) Votes",
+    ),
+    "2026_prop_city_percent_For": (
+        "number",
+        "Share of this precinct's vote on the 2026 city proposition cast FOR "
+        "(fraction 0-1). Blank where the precinct has no `city` row in "
+        "`2026_props_general_precinct.csv`.",
+        "2026 Prop City (For) Share",
+    ),
+    "2026_prop_city_percent_Against": (
+        "number",
+        "Share of this precinct's vote on the 2026 city proposition cast AGAINST "
+        "(fraction 0-1). Blank where the precinct has no `city` row in "
+        "`2026_props_general_precinct.csv`.",
+        "2026 Prop City (Against) Share",
+    ),
+    "2026_prop_city_percent_Turnout": (
+        "number",
+        "Share of this precinct's registered voters who voted on the ballot carrying "
+        "the 2026 city proposition (fraction 0-1). Blank where the precinct has no "
+        "`city` row in `2026_props_general_precinct.csv`.",
+        "2026 Prop City Turnout Share",
+    ),
+    "2026_prop_county_votes_For": (
+        "integer",
+        "Votes cast FOR the 2026 county proposition in this precinct. Blank where the "
+        "precinct has no `county` row in `2026_props_general_precinct.csv`.",
+        "2026 Prop County (For) Votes",
+    ),
+    "2026_prop_county_votes_Against": (
+        "integer",
+        "Votes cast AGAINST the 2026 county proposition in this precinct. Blank where "
+        "the precinct has no `county` row in `2026_props_general_precinct.csv`.",
+        "2026 Prop County (Against) Votes",
+    ),
+    "2026_prop_county_percent_For": (
+        "number",
+        "Share of this precinct's vote on the 2026 county proposition cast FOR "
+        "(fraction 0-1). Blank where the precinct has no `county` row in "
+        "`2026_props_general_precinct.csv`.",
+        "2026 Prop County (For) Share",
+    ),
+    "2026_prop_county_percent_Against": (
+        "number",
+        "Share of this precinct's vote on the 2026 county proposition cast AGAINST "
+        "(fraction 0-1). Blank where the precinct has no `county` row in "
+        "`2026_props_general_precinct.csv`.",
+        "2026 Prop County (Against) Share",
+    ),
+    "2026_prop_county_percent_Turnout": (
+        "number",
+        "Share of this precinct's registered voters who voted on the ballot carrying "
+        "the 2026 county proposition (fraction 0-1). Blank where the precinct has no "
+        "`county` row in `2026_props_general_precinct.csv`.",
+        "2026 Prop County Turnout Share",
+    ),
+    "2026_registered_general": (
+        "integer",
+        "Registered voters in this precinct as published with the 2026 "
+        "general-election results. The official count, distinct from the "
+        "canvass-period 2026_registered; the two are not interchangeable. Blank where the precinct "
+        "has no row in `2026_governor_general_precinct.csv`.",
+        "2026 Registered Voters (General Election)",
     ),
     # --- derived ---
     "response_count": (

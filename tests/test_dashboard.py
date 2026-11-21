@@ -487,14 +487,16 @@ RETIRED = ["prop_a_city_against_election_day", "prop_a_city_against_ev_in_person
 assert not [c for c in RETIRED if c in header], f"detail.xlsx fields survived: {RETIRED}"
 assert not [c for c in bpd.COMB_OVERLAYS if c in header], \
     "an overlaid measure was also carried under its own name"
-# AC1 / AC7 shape, asserted rather than printed: 85 rows x 99 columns, and one
+# AC1 / AC7 shape, asserted rather than printed: 85 rows x 120 columns, and one
 # dictionary row per extract column with nothing falling through to the
 # UNDOCUMENTED branch.  Without this a further measure in precinct_comb.csv is
 # silently promoted into join_cols by comb_columns(), which returns every
-# non-key header column, and the count moves with no check to fail.
-assert len(header) == 99, header
+# non-key header column, and the count moves with no check to fail.  120 = 99 at
+# the last baseline, less the four superseded 2026 canvass placeholders, plus the
+# 25 measures the three 2026 general-election files join in.
+assert len(header) == 120, header
 assert len(rebuilt) == 85, len(rebuilt)
-assert len(fresh_dict) == len(header) == 99, (len(fresh_dict), len(header))
+assert len(fresh_dict) == len(header) == 120, (len(fresh_dict), len(header))
 assert set(fresh_dict) == set(header), \
     "dictionary and extract disagree on the field set"
 undocumented = sorted(f for f, r in fresh_dict.items() if "add to MANUAL" in r["description"])
@@ -510,6 +512,38 @@ missing_targets = sorted(set(bpd.COMB_OVERLAYS.values()) - set(header))
 assert not missing_targets, f"overlay targets never reached the extract: {missing_targets}"
 ok("sheet-72 fields gone; AC1/AC7 shape and overlay targets all present",
    f"{len(header)} columns x {len(rebuilt)} rows")
+
+# AC2, asserted rather than left to a manual diff against a /tmp backup.  The
+# reproducibility check above compares a fresh rebuild with the artifact THIS code
+# wrote, so it proves determinism, not equivalence with the previous build: a
+# change that silently rewrote a canvass figure would pass it.  The baseline comes
+# from git because a /tmp backup does not survive a reboot or a fresh clone.
+import subprocess  # noqa: E402
+
+BASELINE_REVISION = "374c0fd"
+try:
+    _baseline_bytes = subprocess.run(
+        ["git", "show", f"{BASELINE_REVISION}:data/precinct_data.csv"],
+        cwd=BASE, capture_output=True, check=True).stdout
+except FileNotFoundError:
+    raise AssertionError("this check needs git to read the baseline extract") from None
+
+with io.StringIO(_baseline_bytes.decode("utf-8-sig"), newline="") as _fh:
+    baseline_rows = {r[bpd.PRECINCT_COL]: r for r in csv.DictReader(_fh)}
+baseline_header = list(next(iter(baseline_rows.values())).keys())
+survived = [c for c in baseline_header if c in header]
+assert len(baseline_header) == 99 and len(survived) == 95, \
+    f"expected 99 baseline columns with 95 surviving, got {len(baseline_header)}/{len(survived)}"
+assert set(baseline_rows) == set(rebuilt), "the build gained or lost precinct rows"
+regressions = [
+    (p, c, baseline_rows[p][c], rebuilt[p][c])
+    for p in baseline_rows for c in survived
+    if baseline_rows[p][c] != rebuilt[p][c]
+]
+assert not regressions, \
+    f"columns this change does not own altered against {BASELINE_REVISION}: {regressions[:5]}"
+ok(f"AC2: the {len(survived)} surviving columns are identical to {BASELINE_REVISION}",
+   f"{len(baseline_rows)} rows x {len(survived)} columns")
 
 # Matrix "Normal precinct": every matched precinct carries all 20 measures
 # verbatim from its Dallas row -- compared cell by cell to the source, for all
@@ -566,6 +600,118 @@ for _c in JOINED_COLS:
     assert "1 of 85 rows empty" in dictionary[_c]["description"], _c
 ok("matrix: 1046 alone is empty in all 20 fields, reported as 1 of 85 rows", f"{len(JOINED_COLS)} fields")
 
+# --- 2026 general election: the three per-precinct result files ------------
+# Same discipline as the roll-up above: asserted on the rebuild, cell by cell for
+# every matched precinct, against the source files keyed by the text after the
+# colon.  A sampled spot-check is what let the earlier column-shift defects ship.
+GOV_RAW = list(csv.DictReader(open(BASE / "data/raw/2026_governor_general_precinct.csv", newline="", encoding="utf-8")))
+SEN_RAW = list(csv.DictReader(open(BASE / "data/raw/2026_senate_general_precinct.csv", newline="", encoding="utf-8")))
+PROPS_RAW = list(csv.DictReader(open(BASE / "data/raw/2026_props_general_precinct.csv", newline="", encoding="utf-8")))
+GOV_IDX = {bpd.general_code(r[bpd.GENERAL_KEY_COL], bpd.GOV_CSV): r for r in GOV_RAW}
+SEN_IDX = {bpd.general_code(r[bpd.GENERAL_KEY_COL], bpd.SEN_CSV): r for r in SEN_RAW}
+PROPS_IDX: dict[str, dict[str, dict[str, str]]] = {}
+for _r in PROPS_RAW:
+    PROPS_IDX.setdefault(bpd.general_code(_r[bpd.GENERAL_KEY_COL], bpd.PROPS_CSV), {})[
+        _r[bpd.GENERAL_PROPS_COL].strip()] = _r
+GENERAL_COLS = bpd.general_columns()
+assert len(GENERAL_COLS) == 25, GENERAL_COLS
+
+
+def general_source(contest, code):
+    if contest == "gov":
+        return GOV_IDX.get(code)
+    if contest == "sen":
+        return SEN_IDX.get(code)
+    return PROPS_IDX.get(code, {}).get(contest)
+
+
+matched_general = [p for p in rebuilt if general_source("gov", p)]
+drift = [
+    (p, contest, src, tgt)
+    for p in matched_general
+    for contest, measures in bpd.GENERAL_CONTESTS
+    for src, tgt in measures.items()
+    # `or {}` because a precinct can be in one file and not another (321 precincts
+    # county-wide have no city row); the blank side of that is asserted below.
+    if rebuilt[p][tgt] != ((general_source(contest, p) or {}).get(src) or "").strip()
+]
+assert not drift, f"joined 2026 values disagree with their source row: {drift[:5]}"
+assert len(matched_general) == 84, len(matched_general)
+ok("matrix: 84 matched precincts carry all 24 contest measures verbatim", f"{len(drift)} mismatches")
+
+# `Registered` is carried once (decision 2b) but asserted to agree across the
+# four files first; check the surviving value is the governor row's.
+reg_drift = [p for p in matched_general
+             if rebuilt[p][bpd.GENERAL_REGISTERED_OUT] != GOV_IDX[p][bpd.GENERAL_REGISTERED_COL].strip()]
+assert not reg_drift, reg_drift
+ok(f"matrix: {bpd.GENERAL_REGISTERED_OUT} equals the source `Registered` for all 84")
+
+# A swap of the city and county rows would be invisible if the two measures were
+# always equal, so prove they are genuinely different contests.  Asserted as
+# "not all collide", never "none collide": one precinct tie is possible in the
+# source and would be a coincidence, not a broken join -- the per-contest loop
+# above is what catches an actual swap, cell by cell.
+swapped = [p for p in matched_general
+           if rebuilt[p]["2026_prop_city_percent_For"] == rebuilt[p]["2026_prop_county_percent_For"]]
+assert len(swapped) < len(matched_general), \
+    "city and county percent_For are identical everywhere, so the pivot is unverifiable"
+ok("matrix: city and county proposition rows are distinct measures, not one row twice",
+   f"{len(matched_general) - len(swapped)} of {len(matched_general)} distinguishable")
+
+# Matrix "Precinct absent from all 3": 1046 has no `113:1046` row in any file.
+gap = [c for c in GENERAL_COLS if rebuilt["1046"][c] != ""]
+assert not gap, f"1046 2026 result figures not blank: {gap}"
+for _line, _name in (("governor", bpd.GOV_CSV.name), ("senate", bpd.SEN_CSV.name)):
+    _rep = [ln for ln in build_report.splitlines() if f"missing from {_name}" in ln]
+    assert _rep and "1046" in _rep[0], _rep
+for _prop in ("city", "county"):
+    _rep = [ln for ln in build_report.splitlines() if f"a {bpd.GENERAL_PROPS_COL} == {_prop} row" in ln]
+    assert _rep and "1046" in _rep[0], _rep
+ok("matrix: 1046 blank across all 25 new fields and named in the report, 4 ways")
+
+# Matrix "Blank source cell" / "Zero-vs-blank": the only empty cell in each new
+# field is 1046, and a recorded 0 stays 0 rather than reading as a gap.  1050
+# (governor Other) and 4141 (Senate Other) are real zeros in the source.
+for _c in GENERAL_COLS:
+    _empties = [p for p in rebuilt if rebuilt[p][_c] == ""]
+    assert _empties == ["1046"], f"{_c}: unexpected empty rows {_empties}"
+    assert "1 of 85 rows empty" in fresh_dict[_c]["description"], _c
+assert rebuilt["1050"]["2026_gov_votes_Other"] == "0", rebuilt["1050"]["2026_gov_votes_Other"]
+assert rebuilt["1050"]["2026_gov_percent_Other"] == "0", rebuilt["1050"]["2026_gov_percent_Other"]
+assert rebuilt["4141"]["2026_sen_votes_Other"] == "0", rebuilt["4141"]["2026_sen_votes_Other"]
+assert rebuilt["4141"]["2026_sen_percent_Other"] == "0", rebuilt["4141"]["2026_sen_percent_Other"]
+ok("matrix: 1046 alone is empty in all 25 fields; a genuine 0 ships as 0",
+   f"{len(GENERAL_COLS)} fields")
+
+# Decision 3a/3b: the four superseded placeholders leave the OUTPUT but stay in
+# the union READ, so fullness() and choose_shift() score exactly what they did
+# before.  Asserting both halves is the point: dropping them from the read too
+# would be indistinguishable here and would silently move dedupe scoring.
+_, union_cols_probe = bpd.read_ods_tables()
+assert not [c for c in bpd.RETIRED_GENERAL_COLS if c in header], \
+    f"a superseded 2026 placeholder survived into the extract: {bpd.RETIRED_GENERAL_COLS}"
+assert bpd.RETIRED_GENERAL_COLS and all(
+    c in union_cols_probe for c in bpd.RETIRED_GENERAL_COLS
+), "a retired placeholder was dropped from the .ods union read, changing dedupe scoring"
+assert "2026_registered" in header, "the canvass-period registered figure was removed with them"
+# Compared as a set: which precincts are blank is the fact, and extract row order
+# is not something any acceptance criterion fixes.
+assert {p for p in rebuilt if rebuilt[p]["2026_registered"] == ""} == {"2039", "1046"}, \
+    "the canvass-period registered figure changed population"
+ok("matrix: 4 placeholders out of the extract, still read from the .ods union; 2026_registered intact")
+
+# Dictionary side: one row per new field, votes/registered integer and percent
+# number (decision 4a), and no new field falling through to the fallback.
+for _c in GENERAL_COLS:
+    _t = fresh_dict[_c]["data_type"]
+    _want = "number" if "percent" in _c else "integer"
+    assert _t == _want, f"{_c} typed {_t}, expected {_want}"
+    assert "add to MANUAL" not in fresh_dict[_c]["description"], _c
+    assert fresh_dict[_c]["readable_name"].strip(), _c
+assert not [c for c in bpd.RETIRED_GENERAL_COLS if c in fresh_dict], \
+    "the generator still documents a retired placeholder"
+ok("dictionary: 25 new fields typed and described; the 4 retired ones are gone")
+
 
 def aborts_when_rollup_is(bad_csv, expect_substring):
     """Run the build with the roll-up replaced; prove it aborted before writing."""
@@ -599,6 +745,149 @@ with tempfile.TemporaryDirectory() as guard_dir:
     aborts_when_rollup_is(_header_only, "no data rows")
     aborts_when_rollup_is(_no_dallas, f"no `{bpd.COMB_COUNTY_COL} == {bpd.COMB_COUNTY}` rows")
 ok("matrix: missing / header-only / no-Dallas roll-up aborts before writing")
+
+# --- the three 2026 general files as required inputs ----------------------
+# The matrix rows for these have no real data to exercise them: all 84 of ours
+# match every file, so the contradiction and the odd-shape cases only a synthetic
+# file can present are driven on synthetic files here.  Each must abort BEFORE
+# the writer opens, the same way the roll-up does -- the builder truncates its
+# output with "w" and has no dry-run, so writing a mostly-empty extract over the
+# committed one is the failure mode being guarded.
+def aborts_when_general_is(attr, bad_path, expect_substring):
+    """Run the build with one 2026 general file replaced; prove it aborted before writing."""
+    _orig, _out, wrote = getattr(bpd, attr), bpd.OUT, []
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            out_path = Path(td) / "precinct_data.csv"
+            setattr(bpd, attr, bad_path)
+            bpd.OUT = out_path
+            err = expect_raises(SystemExit, bpd.main)
+            if out_path.exists():
+                wrote.append(out_path.name)
+    finally:
+        setattr(bpd, attr, _orig)
+        bpd.OUT = _out
+    assert not wrote, f"the build wrote precinct_data.csv despite the unusable {attr}"
+    assert expect_substring in str(err), (expect_substring, str(err))
+    return err
+
+
+with tempfile.TemporaryDirectory() as g_dir:
+    _ghead, _phead = list(GOV_RAW[0].keys()), list(PROPS_RAW[0].keys())
+    _ok = matched_general[0]  # a precinct present in all three files
+
+    def _gen_file(name, header, rows):
+        p = Path(g_dir) / name
+        with open(p, "w", newline="", encoding="utf-8") as fh:
+            w = csv.writer(fh)
+            w.writerow(header)
+            w.writerows(rows)
+        return p
+
+    # Bodies shaped for each loader: a governor-shaped row aimed at the Senate
+    # loader aborts on its foreign candidate columns long before the condition
+    # under test, so every fixture must otherwise be valid for its target.
+    _shead = list(SEN_RAW[0].keys())
+    _body = lambda code, head=_ghead: [f"113:{code}"] + ["1"] * (len(head) - 1)
+    _pbody = lambda code, prop: [f"113:{code}", prop] + ["1"] * (len(_phead) - 2)
+    _absent = Path(g_dir) / "absent_governor.csv"
+    _empty = _gen_file("header_only.csv", _ghead, [])
+    _nomatch = _gen_file("no_match.csv", _shead, [_body("999999", _shead)])
+    _dup_gov = _gen_file("dup_governor.csv", _ghead, [_body(_ok)] * 2)
+    _dup_sen = _gen_file("dup_senate.csv", _shead, [_body(_ok, _shead)] * 2)
+    _dup_props = _gen_file("dup_props.csv", _phead, [_pbody(_ok, "city")] * 2)
+    _extra = _gen_file("extra_measure.csv", _ghead + ["votes_Romney"],
+                       [_body(_ok) + ["9"]])
+    _extra_sen = _gen_file("extra_senate.csv", _shead + ["votes_Romney"],
+                           [_body(_ok, _shead) + ["9"]])
+    _extra_props = _gen_file("extra_props.csv", _phead + ["votes_Abstain"],
+                             [_pbody(_ok, "city") + ["9"]])
+    _badprop = _gen_file("odd_proposition.csv", _phead,
+                         [_pbody(_ok, p) for p in ("city", "school")])
+    # Each failure mode is driven on a DIFFERENT file, so the shared guard in
+    # _general_read is proven to run for all three paths rather than once.  The
+    # file a case is aimed at must otherwise be shaped for that loader, or the
+    # build aborts earlier for a different reason than the case intends.
+    def _drop(header, row, *victims):
+        return ([c for c in header if c not in victims],
+                [v for c, v in zip(header, row) if c not in victims])
+
+    _h, _r = _drop(_ghead, _body(_ok), bpd.GENERAL_KEY_COL)
+    _nokey = _gen_file("no_key.csv", _h, [_r])
+    _h, _r = _drop(_ghead, _body(_ok), bpd.GENERAL_REGISTERED_COL)
+    _noreg = _gen_file("no_registered.csv", _h, [_r])
+    # A race file that grew the proposition discriminator.  Shaped like the race
+    # files with `Proposition` as its ONLY extra column, so the abort can only
+    # come from that column: `Proposition` is exempt for the props loader alone,
+    # and must read as undescribed here rather than be skipped and resurface
+    # later as a duplicate suffix.
+    _raceprop = _gen_file("race_with_proposition.csv", _ghead + [bpd.GENERAL_PROPS_COL],
+                          [_body(_ok) + ["city"]])
+    _err = aborts_when_general_is("GOV_CSV", _absent, "missing required input")
+    assert "absent_governor.csv" in str(_err), _err
+    aborts_when_general_is("PROPS_CSV", _empty, "no data rows")
+    aborts_when_general_is("SEN_CSV", _nomatch, "matches none of")
+    aborts_when_general_is("GOV_CSV", _nokey, f"no `{bpd.GENERAL_KEY_COL}` column")
+    aborts_when_general_is("SEN_CSV", _noreg, f"no `{bpd.GENERAL_REGISTERED_COL}` column")
+    aborts_when_general_is("SEN_CSV", _dup_sen, "would be ambiguous")
+    # The props loader words its duplicate abort per proposition, since two rows
+    # sharing a suffix is a different fault from two rows for the same precinct
+    # and proposition -- both must abort, neither may silently pick one.
+    aborts_when_general_is("PROPS_CSV", _dup_props, "the pivot would have to pick one")
+    aborts_when_general_is("SEN_CSV", _extra_sen, "undescribed measure columns")
+    aborts_when_general_is("PROPS_CSV", _extra_props, "undescribed measure columns")
+    _err = aborts_when_general_is("GOV_CSV", _raceprop, "undescribed measure columns")
+    assert bpd.GENERAL_PROPS_COL in str(_err), _err
+    aborts_when_general_is("PROPS_CSV", _badprop, "expected one of")
+ok("matrix: absent / header-only / no-match / missing key / missing Registered /"
+   " duplicate-suffix / undescribed column / unknown proposition each abort, per file")
+
+# Matrix "Proposition with no city row" and "Blank source cell": 321 precincts
+# county-wide have no city row and 59 have blank shares, but none is ours, so the
+# applier is driven directly -- the 5 city figures blank, the county figures land,
+# and a cell the source leaves empty stays empty instead of becoming a zero.
+_county_row = next(r for r in PROPS_RAW if r["Proposition"] == "county")
+_blank_gov = {k: "" for k in _ghead}
+_blank_gov[bpd.GENERAL_REGISTERED_COL] = "1000"
+_probe = {}
+bpd.apply_general(_probe, {"gov": _blank_gov, "sen": None, "city": None, "county": _county_row})
+_city_targets = list(bpd.PROPS_MEASURES["city"].values())
+assert [_probe[t] for t in _city_targets] == [""] * len(_city_targets), _probe
+assert _probe["2026_prop_county_votes_For"] == _county_row["votes_For"].strip()
+assert _probe["2026_gov_percent_Other"] == "", "a blank source cell became a value"
+assert _probe["2026_sen_votes_Paxton"] == "", "a file with no row wrote something other than blank"
+assert _probe[bpd.GENERAL_REGISTERED_OUT] == "1000"
+ok("matrix: no city row leaves the 5 city figures blank; a blank source cell stays blank")
+
+# Matrix "Registered contradiction": 48 county-wide precincts disagree and none of
+# ours does, so taking the governor figure without checking would promote the
+# contradiction silently.  Drive the disagreement on synthetic rows.
+_err = expect_raises(
+    SystemExit, bpd.assert_registered_agreement,
+    {"1004": {bpd.GENERAL_REGISTERED_COL: "1708"}},
+    {"1004": {bpd.GENERAL_REGISTERED_COL: "1709"}},
+    {"1004": {"city": {bpd.GENERAL_REGISTERED_COL: "1708"},
+              "county": {bpd.GENERAL_REGISTERED_COL: "1708"}}},
+    {"1004"})
+assert "1004" in str(_err) and "governor=1708" in str(_err) and "senate=1709" in str(_err), _err
+# A blank reads as "not recorded", not as a rival value, so it must not abort.
+bpd.assert_registered_agreement({"1004": {bpd.GENERAL_REGISTERED_COL: "1708"}},
+                               {"1004": {bpd.GENERAL_REGISTERED_COL: ""}}, {}, {"1004"})
+ok("matrix: a Registered disagreement aborts naming the precinct and each file's value")
+
+# The prefix carries the county, so it is part of the key's meaning: precinct
+# 2103 exists under both Dallas and Denton, and joining on a bare or foreign
+# suffix would pick one at random.  Asserted on the unit that does the splitting,
+# because every file in the repo carries `113` alone -- no committed row can
+# present the other shapes.  Leading zeros survive as text: casting to int, the
+# mistake the roll-up's rule forbids, would erase them.
+assert bpd.general_code("113:1004", bpd.GOV_CSV) == "1004"
+assert bpd.general_code("  113:1004  ", bpd.GOV_CSV) == "1004"
+assert bpd.general_code("113:0024", bpd.GOV_CSV) == "0024", "leading zeros must survive"
+for _bad_key in ("1004", "999:1004", "113:", ""):
+    _e = expect_raises(SystemExit, bpd.general_code, _bad_key, bpd.GOV_CSV)
+    assert "unusable" in str(_e) and "113" in str(_e), (_bad_key, _e)
+ok("matrix: only `113:<code>` keys join; bare/foreign/empty keys abort, zeros preserved")
 
 # Use Streamlit's real event-state types, not a hand-rolled double nesting:
 # main() hands selected_props the PydeckState that st.pydeck_chart returns, and a

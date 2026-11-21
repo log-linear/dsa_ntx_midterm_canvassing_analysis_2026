@@ -29,6 +29,15 @@ Pipeline
    supply: ``2024_kamala``, ``2024_prop_r_for`` and ``2024_prop_u_against`` keep
    their names and take the official county figure, and go blank where the
    precinct has no Dallas row in the roll-up.
+   The three official 2026 general-election precinct files -- governor, Senate
+   and the city/county propositions -- join on the same basis and for the same
+   reason: their ``new_precinct`` key is ``113:<precinct code>``, so the join
+   compares the text after the colon as TEXT and never casts it to int.  They
+   too join only after both dedupes, so their 25 measures cannot influence how a
+   raw ``.ods`` row was scored or repaired either.  They supersede the canvass
+   workbooks' four 2026 placeholders -- ``2026_turnout``, ``2026_bond``,
+   ``2026_talarico`` and ``2026_hinojosa`` -- which are dropped from the output
+   while staying in the union read, so the dedupe scoring is byte-unchanged.
 5. Collapse the joined output to one row per ``dallas_county_precinct_number``
    (see ONE ROW PER PRECINCT).  The VTD fan-out produced several rows per
    precinct with repeated precinct-level values; the joined output keeps the
@@ -81,6 +90,70 @@ COMB_CSV = RAW / "precinct_comb.csv"  # county results roll-up, one row per (cou
 COMB_COUNTY = "Dallas"   # the only county whose rows this build joins
 COMB_COUNTY_COL = "county"
 COMB_KEY_COL = "precinct"
+
+# --- 2026 general election: three official per-precinct result files -------
+GOV_CSV = RAW / "2026_governor_general_precinct.csv"
+SEN_CSV = RAW / "2026_senate_general_precinct.csv"
+PROPS_CSV = RAW / "2026_props_general_precinct.csv"  # long format: one row per precinct per proposition
+GENERAL_KEY_COL = "new_precinct"        # `113:<dallas county precinct code>`
+GENERAL_KEY_PREFIXES = {"113"}          # Dallas; every key in all three files carries it
+GENERAL_REGISTERED_COL = "Registered"
+GENERAL_PROPS_COL = "Proposition"       # discriminator: `city` / `county`
+GENERAL_PROPS = ("city", "county")
+
+# Output names, namespaced by contest (decision 2a): `votes_Other` appears in
+# both race files and `votes_For` in both proposition rows, so no source name
+# can be carried verbatim.  `Registered` is carried once, from the governor
+# file, after asserting all four files agree on it for every matched precinct
+# (decision 2b).  A source column outside these maps aborts the build rather
+# than being promoted silently the way comb_columns() promotes one.
+GOV_MEASURES = {
+    "votes_Abbott": "2026_gov_votes_Abbott",
+    "votes_Hinojosa": "2026_gov_votes_Hinojosa",
+    "votes_Other": "2026_gov_votes_Other",
+    "percent_Abbott": "2026_gov_percent_Abbott",
+    "percent_Hinojosa": "2026_gov_percent_Hinojosa",
+    "percent_Other": "2026_gov_percent_Other",
+    "percent_Turnout": "2026_gov_percent_Turnout",
+}
+SEN_MEASURES = {
+    "votes_Paxton": "2026_sen_votes_Paxton",
+    "votes_Talarico": "2026_sen_votes_Talarico",
+    "votes_Other": "2026_sen_votes_Other",
+    "percent_Paxton": "2026_sen_percent_Paxton",
+    "percent_Talarico": "2026_sen_percent_Talarico",
+    "percent_Other": "2026_sen_percent_Other",
+    "percent_Turnout": "2026_sen_percent_Turnout",
+}
+PROPS_MEASURES = {
+    "city": {
+        "votes_For": "2026_prop_city_votes_For",
+        "votes_Against": "2026_prop_city_votes_Against",
+        "percent_For": "2026_prop_city_percent_For",
+        "percent_Against": "2026_prop_city_percent_Against",
+        "percent_Turnout": "2026_prop_city_percent_Turnout",
+    },
+    "county": {
+        "votes_For": "2026_prop_county_votes_For",
+        "votes_Against": "2026_prop_county_votes_Against",
+        "percent_For": "2026_prop_county_percent_For",
+        "percent_Against": "2026_prop_county_percent_Against",
+        "percent_Turnout": "2026_prop_county_percent_Turnout",
+    },
+}
+GENERAL_CONTESTS = [
+    ("gov", GOV_MEASURES),
+    ("sen", SEN_MEASURES),
+    ("city", PROPS_MEASURES["city"]),
+    ("county", PROPS_MEASURES["county"]),
+]
+GENERAL_REGISTERED_OUT = "2026_registered_general"
+
+# Canvass-workbook placeholders the official results supersede (decision 3a).
+# They stay in the .ods union read, so fullness() and choose_shift() scoring is
+# byte-unchanged; only the writer excludes them (decision 3b).
+RETIRED_GENERAL_COLS = ("2026_turnout", "2026_bond", "2026_talarico", "2026_hinojosa")
+
 SHARE_COL = "share_of_county_precinct"  # crosswalk: how much of the precinct this VTD covers
 RESPONSE_COUNT_COL = "response_count"  # estimated households reached: round(canvass_attempts * response_rate)
 NO_PCT_COL = "prop_a_city_no_canvassing_pct"   # no-rate of responders: strong_no / response_count
@@ -343,6 +416,183 @@ def apply_comb(row, source, measures):
     return row
 
 
+def general_columns():
+    """Output names the 2026 general files supply: 24 contest measures plus Registered."""
+    cols = [target for _, measures in GENERAL_CONTESTS for target in measures.values()]
+    return cols + [GENERAL_REGISTERED_OUT]
+
+
+def general_code(key, path):
+    """Precinct code from a general-election key: the text after the colon.
+
+    The three files key `new_precinct` as `113:<code>` while the extract holds
+    bare codes, so the join compares the suffix as whitespace-stripped TEXT and
+    never casts either side to int -- `0024`-style codes do not survive casting.
+    The prefix set is `{113}` only, so a key outside it is not silently joined
+    on its suffix: it would make two counties' precincts indistinguishable, which
+    is precisely the ambiguity that aborts the build.
+    """
+    text = (key or "").strip()
+    prefix, sep, suffix = text.partition(":")
+    if not sep or prefix not in GENERAL_KEY_PREFIXES or not suffix.strip():
+        raise SystemExit(
+            f"{path}: unusable `{GENERAL_KEY_COL}` {text!r}; expected "
+            f"{sorted(GENERAL_KEY_PREFIXES)} + ':' + the precinct code"
+        )
+    return suffix.strip()
+
+
+def _general_read(path, union_keys):
+    """Read one 2026 general-election file, guarding it as a required input.
+
+    A missing file, a header-only file, an absent key column or a file matching
+    none of the union precincts aborts before anything is written -- the roll-up
+    gets the same treatment in load_comb().
+    """
+    if not path.exists():
+        raise SystemExit(f"missing required input: {path}")
+    rows, cols = load_csv(path)
+    if GENERAL_KEY_COL not in cols:
+        raise SystemExit(f"{path} has no `{GENERAL_KEY_COL}` column; header is {cols}")
+    if GENERAL_REGISTERED_COL not in cols:
+        raise SystemExit(f"{path} has no `{GENERAL_REGISTERED_COL}` column; header is {cols}")
+    if not rows:
+        raise SystemExit(f"{path} has a header but no data rows")
+    codes = {general_code(r[GENERAL_KEY_COL], path) for r in rows}
+    if not codes & set(union_keys):
+        raise SystemExit(
+            f"{path} matches none of the {len(set(union_keys))} union precincts "
+            f"({len(codes)} distinct codes in the file)"
+        )
+    return rows, cols
+
+
+def _general_check_measures(path, cols, measures, allowed, exempt=(GENERAL_KEY_COL,)):
+    """Abort unless the file's columns are exactly the described measures.
+
+    `exempt` names the non-measure columns of that file: only the proposition
+    file carries `Proposition`, so a race file that grew one is an undescribed
+    column and aborts rather than being mistaken for a measure.
+    """
+    described = set(measures) | set(allowed)
+    extra = [c for c in cols if c not in exempt and c not in described]
+    if extra:
+        raise SystemExit(
+            f"{path} carries undescribed measure columns {extra}; describe them in "
+            f"the contest map rather than letting a new measure join silently"
+        )
+    absent = [m for m in measures if m not in cols]
+    if absent:
+        raise SystemExit(f"{path} is missing described measures {absent}")
+
+
+def load_general_race(path, measures, union_keys):
+    """Index one 2026 general race file by precinct code (text after the colon).
+
+    One row per precinct: two rows sharing a suffix would make the join
+    ambiguous, so that aborts instead of the first row winning.  Values are
+    carried as the source wrote them, whitespace-stripped only, and a `0` stays
+    `0` -- only a precinct with no row is absent from the index, which is what
+    makes its figures read blank rather than zero.
+    """
+    rows, cols = _general_read(path, union_keys)
+    _general_check_measures(path, cols, list(measures), [GENERAL_REGISTERED_COL])
+    index: "dict[str, dict[str, str]]" = {}
+    for r in rows:
+        code = general_code(r[GENERAL_KEY_COL], path)
+        if code in index:
+            raise SystemExit(
+                f"{path}: precinct {code} has two rows "
+                f"({index[code][GENERAL_KEY_COL]!r} and {r[GENERAL_KEY_COL]!r}); "
+                f"the suffix join would be ambiguous"
+            )
+        index[code] = r
+    return index, len(rows)
+
+
+def load_general_props(path, union_keys):
+    """Index the long-format proposition file as code -> {proposition: row}.
+
+    Pivoted (decision 1a) into one column set per `Proposition` value, and only
+    the two described values are accepted: an unexpected one would otherwise be
+    dropped without a trace.  A precinct with no `city` row simply has no `city`
+    entry, which is what leaves its 5 city figures blank.
+    """
+    rows, cols = _general_read(path, union_keys)
+    if GENERAL_PROPS_COL not in cols:
+        raise SystemExit(f"{path} has no `{GENERAL_PROPS_COL}` column; header is {cols}")
+    measures = list(PROPS_MEASURES["city"])
+    if list(PROPS_MEASURES["county"]) != measures:
+        raise SystemExit(f"{PROPS_CSV} city and county column maps disagree; both must describe {measures}")
+    _general_check_measures(
+        path, cols, measures, [GENERAL_REGISTERED_COL],
+        exempt=(GENERAL_KEY_COL, GENERAL_PROPS_COL))
+    index: "dict[str, dict[str, dict[str, str]]]" = {}
+    for r in rows:
+        code = general_code(r[GENERAL_KEY_COL], path)
+        prop = (r.get(GENERAL_PROPS_COL) or "").strip()
+        if prop not in GENERAL_PROPS:
+            raise SystemExit(
+                f"{path} carries `{GENERAL_PROPS_COL}` value {prop!r} for precinct "
+                f"{code}; expected one of {list(GENERAL_PROPS)}"
+            )
+        slot = index.setdefault(code, {})
+        if prop in slot:
+            raise SystemExit(
+                f"{path}: precinct {code} has two `{prop}` proposition rows; the "
+                f"pivot would have to pick one"
+            )
+        slot[prop] = r
+    return index, len(rows)
+
+
+def assert_registered_agreement(gov, sen, props, codes):
+    """Decision 2b: the four files must agree on `Registered` per matched precinct.
+
+    County-wide 48 of 791 precincts disagree; none of ours does.  Taking the
+    governor file's figure without checking would promote that contradiction
+    silently, so a disagreement aborts naming the precinct and each file's value.
+    A blank is "not recorded" rather than a rival value, so it does not clash.
+    """
+    for code in sorted(codes):
+        seen = []
+        for contest, source in (
+            ("governor", gov.get(code)),
+            ("senate", sen.get(code)),
+            ("city", (props.get(code) or {}).get("city")),
+            ("county", (props.get(code) or {}).get("county")),
+        ):
+            if source is None:
+                continue
+            value = (source.get(GENERAL_REGISTERED_COL) or "").strip()
+            if value:
+                seen.append((contest, value))
+        if len({v for _, v in seen}) > 1:
+            raise SystemExit(
+                f"2026 `{GENERAL_REGISTERED_COL}` disagrees for precinct {code}: "
+                + ", ".join(f"{c}={v}" for c, v in seen)
+            )
+
+
+def apply_general(row, sources):
+    """Copy the 2026 general-election measures onto an assembled precinct row, in place.
+
+    `sources` maps each of the four contests to its matched row, or None where
+    that file has no row for the precinct: those measures stay blank, never zero.
+    A measure the matched row leaves empty stays empty, since the source recorded
+    nothing for it.  Runs after the .ods union, the alignment repair and both
+    dedupes, exactly like apply_comb, so these figures cannot influence how raw
+    rows were type-checked or scored for fullness.
+    """
+    for contest, measures in GENERAL_CONTESTS:
+        source = sources.get(contest)
+        for m, target in measures.items():
+            row[target] = ((source.get(m) if source else None) or "").strip()
+    gov = sources.get("gov")
+    row[GENERAL_REGISTERED_OUT] = ((gov.get(GENERAL_REGISTERED_COL) if gov else None) or "").strip()
+    return row
+
+
 def complement(value_raw):
     """1 - value as text, blank when the source share is missing."""
     value = as_number(value_raw)
@@ -530,6 +780,18 @@ def main() -> None:
     comb, comb_measures, comb_rows = load_comb()
     comb_cols = comb_columns(comb_measures)
 
+    # The 2026 general files are required inputs, so they are read and validated
+    # here -- before the writer opens -- and joined to the assembled rows below.
+    # Strict indexing, as this line did before the 2026 files needed it early: a
+    # sheet that lost its first column must abort here, not contribute a blank
+    # key that would then flow into the required-input guards below.
+    union_keys = {r[PRECINCT_COL].strip() for r in union}
+    gov, gov_rows = load_general_race(GOV_CSV, GOV_MEASURES, union_keys)
+    sen, sen_rows = load_general_race(SEN_CSV, SEN_MEASURES, union_keys)
+    props, props_rows = load_general_props(PROPS_CSV, union_keys)
+    assert_registered_agreement(gov, sen, props, union_keys)
+    general_cols = general_columns()
+
     by_precinct: "dict[str, list[dict[str, str]]]" = {}
     for r in map_rows:
         by_precinct.setdefault(r["dallas_county_precinct_id"].strip(), []).append(r)
@@ -540,11 +802,16 @@ def main() -> None:
         [c for c in map_cols if c != "dallas_county_precinct_id"]
         + dfs_cols
         + comb_cols
+        + general_cols
         + [RESPONSE_COUNT_COL, NO_PCT_COL, RENTER_COL]
     )
     out_cols = (
         key_cols
-        + [c for c in union_cols if c not in key_cols + ["source_file"]]
+        # The four superseded 2026 placeholders are read from the .ods union but
+        # not written (decision 3b): extrasaction="ignore" drops them, so the
+        # fullness and alignment scoring above stays byte-unchanged.
+        + [c for c in union_cols
+           if c not in key_cols + ["source_file"] + list(RETIRED_GENERAL_COLS)]
         + ["source_file"]
         + join_cols
     )
@@ -595,6 +862,23 @@ def main() -> None:
             unmatched_comb.append(code)
         apply_comb(row, source, comb_measures)
 
+    # The 2026 general election joins last for the same reason: its measures must
+    # not reach fullness(), choose_shift() or the alignment repair above.
+    unmatched_general: "dict[str, list[str]]" = {}
+    for row in rows:
+        code = (row.get(PRECINCT_COL) or "").strip()
+        prop_rows = props.get(code) or {}
+        sources = {
+            "gov": gov.get(code),
+            "sen": sen.get(code),
+            "city": prop_rows.get("city"),
+            "county": prop_rows.get("county"),
+        }
+        for contest, source in sources.items():
+            if source is None:
+                unmatched_general.setdefault(contest, []).append(code)
+        apply_general(row, sources)
+
     with open(OUT, "w", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=out_cols, extrasaction="ignore")
         writer.writeheader()
@@ -620,13 +904,20 @@ def main() -> None:
     print(f"rows repaired for alignment ({len(repaired)}):")
     for r in repaired:
         print(f"    {r}")
-    union_keys = {r[PRECINCT_COL].strip() for r in union}
     matched_comb = sorted(union_keys & set(comb))
     print(f"union precincts missing from VTD map : {sorted(set(unmatched_vtd))}")
     print(f"VTD geoids missing from DFS export   : {sorted(set(unmatched_dfs))}")
     print(f"roll-up rows                         : {comb_rows} total, {len(comb)} {COMB_COUNTY},"
           f" {len(matched_comb)} of {len(union_keys)} union precincts matched")
     print(f"union precincts missing from {COMB_CSV.name}: {sorted(set(unmatched_comb))}")
+    print(f"2026 general rows                      : {gov_rows} governor, {sen_rows} senate, "
+          f"{props_rows} proposition rows over {len(props)} precincts")
+    print(f"2026 general columns                   : {len(general_cols)} new "
+          f"({GENERAL_REGISTERED_OUT} carried once from the governor file)")
+    print(f"union precincts missing from {GOV_CSV.name}: {sorted(unmatched_general.get('gov', []))}")
+    print(f"union precincts missing from {SEN_CSV.name}: {sorted(unmatched_general.get('sen', []))}")
+    print(f"union precincts missing a {GENERAL_PROPS_COL} == city row   : {sorted(unmatched_general.get('city', []))}")
+    print(f"union precincts missing a {GENERAL_PROPS_COL} == county row : {sorted(unmatched_general.get('county', []))}")
     for col in (RESPONSE_COUNT_COL, NO_PCT_COL, RENTER_COL):
         # A computed `response_count` of 0 is a finding, not an absence, so it
         # counts as populated: `r.get(col)` is the string "0", which is truthy.
