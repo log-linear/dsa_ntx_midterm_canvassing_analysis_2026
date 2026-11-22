@@ -45,7 +45,8 @@ LAYER_URL = (
 JOIN_LAYER_KEY = "NewPrcnt"
 JOIN_CSV_KEY = "dallas_county_precinct_number"
 
-# The choropleth field is user-selectable across exactly these.
+# The choropleth field is user-selectable across exactly these: the three
+# canvass-era metrics plus the four 2026 general-election result shares.
 # TOOLTIP_FIELDS is a deliberately wider list: what hovering shows. The two
 # are separate concerns, so keep them separate -- `decorate` builds the
 # record keys the tooltip reads from TOOLTIP_FIELDS, never from this list.
@@ -53,6 +54,10 @@ CHOROPLETH_FIELDS = [
     "prop_a_city_no_canvassing_pct",
     "canvass_attempts",
     "response_rate",
+    "2026_gov_percent_Hinojosa",
+    "2026_sen_percent_Talarico",
+    "2026_prop_city_percent_Against",
+    "2026_prop_county_percent_Against",
 ]
 TOOLTIP_FIELDS = [
     "prop_a_city_no_canvassing_pct",
@@ -66,6 +71,14 @@ TOOLTIP_FIELDS = [
     "2020_percent_Sanders",
     "2020_percent_Biden",
     "2020_percent_Other",
+    # The four colourable 2026 result shares land last: the existing 11 keep
+    # their hover order and the new figures append to it.  Colourable stays a
+    # strict subset of hover -- `decorate` writes a `v_<field>` key per tooltip
+    # field only, so a colourable field missing here has no key to read.
+    "2026_gov_percent_Hinojosa",
+    "2026_sen_percent_Talarico",
+    "2026_prop_city_percent_Against",
+    "2026_prop_county_percent_Against",
 ]
 DEFAULT_CHOROPLETH = "prop_a_city_no_canvassing_pct"
 
@@ -149,6 +162,23 @@ NO_DATA_TEXT = "\u2014"  # em-dash: no value, distinct from 0.0
 MAP_STYLE_URL = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
 LAYER_ID = "precincts"  # Layer(id=...) is required or selection state is unkeyed
 CACHE_TTL = 900  # seconds; the geometry is "Current" and reflows rarely
+
+# Dallas City Council districts, same FeatureServer query pattern as LAYER_URL:
+# `f=geojson` so the coordinates arrive WGS84 like the precinct layer and nothing
+# is reprojected client-side.  14 features, `maxRecordCount` 2000, so no pagination.
+COUNCIL_LAYER_URL = (
+    "https://services2.arcgis.com/rwnOSbfKSwyTBcwN/arcgis/rest/services/"
+    "CouncilBoundaries/FeatureServer/0/query"
+    "?where=1=1&outFields=*&returnGeometry=true&f=geojson"
+)
+COUNCIL_LAYER_ID = "council_districts"
+# Outlines only (Decision 2a): `filled=False`, so this RGBA list is a LINE colour
+# and never a fill.  It is deliberately not the precinct ramp -- a district border
+# has to stay readable over any choropleth colour underneath it.
+COUNCIL_LINE_COLOR = [31, 68, 132, 100]
+COUNCIL_LINE_WIDTH_MIN_PIXELS = 2  # device px, so a boundary survives zoom-out
+DISTRICT_ON = "Yes"
+DISTRICT_OFF = "No"
 
 
 # ---------------------------------------------------------------------------
@@ -404,6 +434,36 @@ def decorate(
     return records
 
 
+def council_district_records(features: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One pydeck record per council polygon PART, all rings kept.
+
+    Mirrors `decorate`'s `__rings` convention so the outline layer reads the same
+    key.  A MultiPolygon becomes one record per part (a record can only carry one
+    ring list), and a Polygon with holes carries every ring, so inner rings draw.
+    Geometry types deck cannot stroke as a polygon contribute nothing rather than
+    a half-built record.
+
+    The records carry the layer attributes (`DISTRICT` etc.) for the payload only:
+    this layer is NOT pickable, so nothing of it can reach a tooltip or a click.
+    """
+    records = []
+    for feature in features:
+        geometry = feature.get("geometry") or {}
+        gtype = geometry.get("type")
+        coordinates = geometry.get("coordinates") or []
+        if gtype == "Polygon":
+            parts = [coordinates]
+        elif gtype == "MultiPolygon":
+            parts = coordinates
+        else:
+            continue
+        for rings in parts:
+            record = dict(feature.get("properties") or {})
+            record["__rings"] = rings
+            records.append(record)
+    return records
+
+
 def detail_records(
     row: dict[str, str] | None,
     dictionary: dict[str, dict[str, str]],
@@ -530,7 +590,10 @@ def _view_state(features: list[dict[str, Any]]):
 
 
 def build_deck(
-    records: list[dict[str, Any]], tooltip: str, features: list[dict[str, Any]]
+    records: list[dict[str, Any]],
+    tooltip: str,
+    features: list[dict[str, Any]],
+    district_records: list[dict[str, Any]] | None = None,
 ):
     """The Deck: PolygonLayer over a free MapLibre basemap, no key.
 
@@ -561,8 +624,29 @@ def build_deck(
         auto_highlight=True,
         extruded=False,
     )
+    layers = [layer]
+    if district_records:
+        # Drawn after the precinct layer, so the outlines sit on top.  `filled`
+        # is off and `pickable` is off on purpose (Decision 2a): no fill lets the
+        # choropleth through, and a non-pickable layer cannot steal a precinct
+        # click or shadow the precinct tooltip.  `line_width_min_pixels` is in
+        # device pixels, so the border does not vanish when zoomed to the county.
+        layers.append(
+            pdk.Layer(
+                "PolygonLayer",
+                data=district_records,
+                id=COUNCIL_LAYER_ID,
+                get_polygon="__rings",
+                filled=False,
+                stroked=True,
+                get_line_color=list(COUNCIL_LINE_COLOR),
+                line_width_min_pixels=COUNCIL_LINE_WIDTH_MIN_PIXELS,
+                pickable=False,
+                extruded=False,
+            )
+        )
     return pdk.Deck(
-        layers=[layer],
+        layers=layers,
         initial_view_state=_view_state(features),
         map_provider="maplibre",
         map_style=MAP_STYLE_URL,
@@ -626,6 +710,13 @@ def main() -> None:
             index=CHOROPLETH_FIELDS.index(DEFAULT_CHOROPLETH),
         )
         field = next(f for f in CHOROPLETH_FIELDS if labels[f] == chosen)
+        # prompt.md:155-156 -- the overlay switch is a drop-down with this exact
+        # title, defaulting to "Yes".
+        show_districts = st.selectbox(
+            "Show Dallas Council Districts?",
+            [DISTRICT_OFF, DISTRICT_ON],
+            index=0,
+        )
         # st.caption(
         #     f"Hover a precinct for all {len(TOOLTIP_FIELDS)} metrics; "
         #     "click one for its "
@@ -649,12 +740,30 @@ def main() -> None:
         _detail_block(index.get(picked), picked, dictionary, panel_fields)
         return
 
+    # Fetched only when the overlay is on, and only after the precinct layer is
+    # known good, so the offline path above stays a single st.error with no
+    # second failure.  A council-endpoint problem degrades to one warning and a
+    # precinct-only map: it never replaces the precinct error path.
+    district_records = None
+    if show_districts == DISTRICT_ON:
+        try:
+            district_records = council_district_records(
+                _cached_council_features()["features"]
+            )
+        except Exception as exc:
+            st.warning(
+                f"Could not load the Dallas Council Districts layer from "
+                f"{COUNCIL_LAYER_URL} ({type(exc).__name__}: {exc}).  Showing the "
+                "precinct choropleth without district boundaries."
+            )
+            district_records = None
+
     fc = decorate(features, rows, field)
     stats = join_precincts(features, rows)
     colored = sum(1 for record in fc if record["__color"] != NO_DATA_COLOR)
 
     chart = st.pydeck_chart(
-        build_deck(fc, tooltip, features),
+        build_deck(fc, tooltip, features, district_records),
         on_select="rerun",
         selection_mode="single-object",
         key="precinct_map",
@@ -694,6 +803,11 @@ def main() -> None:
 
 # Cache geometry so switching the colour field does not refetch 4.6 MB.
 _cached_features = st.cache_data(ttl=CACHE_TTL)(fetch_features)
+# Same TTL and same cache for the same reason: the boundary geometry rarely
+# moves, and a rerun that only changes the colour field must not refetch it.
+_cached_council_features = st.cache_data(ttl=CACHE_TTL)(
+    lambda: fetch_features(COUNCIL_LAYER_URL)
+)
 
 # `streamlit run dashboard.py` executes this file as __main__; a bare `import
 # dashboard` must not start a run, so the pure data layer stays testable.

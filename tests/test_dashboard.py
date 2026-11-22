@@ -415,6 +415,213 @@ assert not missing, f"an accessor names a key the records do not carry: {missing
 ok("every @@= prop is a JSON expression over keys the records have")
 ok("Layer(id=...) is the id pydeck emits and the selection key", dashboard.LAYER_ID)
 
+# ===========================================================================
+# 2026 colour fields + the Dallas Council Districts overlay
+# ===========================================================================
+# The four additions the plan names, in the order the sidebar must offer them.
+NEW_FIELDS = [
+    "2026_gov_percent_Hinojosa",
+    "2026_sen_percent_Talarico",
+    "2026_prop_city_percent_Against",
+    "2026_prop_county_percent_Against",
+]
+assert dashboard.CHOROPLETH_FIELDS[3:] == NEW_FIELDS, dashboard.CHOROPLETH_FIELDS
+assert dashboard.TOOLTIP_FIELDS[-4:] == NEW_FIELDS, dashboard.TOOLTIP_FIELDS
+assert dashboard.DEFAULT_CHOROPLETH == "prop_a_city_no_canvassing_pct"
+# Hover stays the wider list, and the 11 pre-existing tooltip rows keep their
+# order so the new figures land last rather than reshuffling the hover card.
+assert dashboard.TOOLTIP_FIELDS[:11] == [
+    "prop_a_city_no_canvassing_pct", "canvass_attempts", "response_rate",
+    "strong_no", "response_count", "2024_prop_r_for", "2024_prop_u_against",
+    "2024_kamala", "2020_percent_Sanders", "2020_percent_Biden",
+    "2020_percent_Other",
+], dashboard.TOOLTIP_FIELDS
+ok("the four 2026 fields are colourable and hover-last; default unmoved",
+   f"{len(dashboard.CHOROPLETH_FIELDS)} colourable / {len(dashboard.TOOLTIP_FIELDS)} hover")
+
+# --- each new colour field scales as a share ------------------------------
+# The pre-existing loop over CHOROPLETH_FIELDS (":331") already decorates all
+# seven colourable fields and asserts 791 records, RGBA-4 fills, `is_painted ==
+# valued` and FILL_ALPHA for each, and collects `populated[field]`.  Repeating
+# that here would only add literals that can drift, so this loop covers what
+# that one cannot: these four are result *shares*, and the count of filled
+# polygons is read from `populated`/`stats`, never typed in.
+for field in NEW_FIELDS:
+    dom = dashboard.field_domain(rows, field)
+    assert dom and dashboard.domain_is_share(dom), (field, dom)
+    assert 0.0 <= dom[0] < dom[1] <= 1.0, (field, dom)
+    # every matched precinct carries a value for a 2026 result share, so the
+    # populated count tracks the join rather than the canvass metrics' 22-49.
+    assert populated[field] == stats["matched"], (field, populated[field])
+    live = dashboard.decorate(features, rows, field)
+    # a field whose domain is a share must vary: a flat ramp would claim a
+    # spread the colour scale does not have.
+    assert len({tuple(r["__color"]) for r in live if is_painted(r["__color"])}) > 1, field
+    # the record carries a formatted value for the hover card too, percented
+    # from the field's own share range (key taken from the extract, not typed in)
+    _probed = next(k for k in sorted(index) if dashboard.to_float(index[k].get(field)) is not None)
+    one = dashboard.decorate(
+        [{"properties": {dashboard.JOIN_LAYER_KEY: _probed}}], rows, field
+    )[0]
+    assert one["v_" + field].endswith("%"), (field, one["v_" + field])
+    assert one["v_" + field] != dashboard.NO_DATA_TEXT, field
+ok("each new field is a share on its own 0-1 range and hover-formats as a percent",
+   f"{populated[NEW_FIELDS[0]]} populated per field")
+
+# Matrix row "Blank field value": 1046 is blank in all four -- it draws nothing
+# while every other matched precinct paints.  It is also absent from the live
+# layer, so drive the polygon directly rather than expecting it in `features`.
+for field in NEW_FIELDS:
+    assert dashboard.to_float(index["1046"].get(field)) is None, field
+    bare = dashboard.decorate(
+        [{"properties": {dashboard.JOIN_LAYER_KEY: "1046"}}], rows, field
+    )[0]
+    assert bare["__matched"] is True, field
+    assert bare["__color"] == dashboard.NO_DATA_COLOR, field
+    assert not is_painted(bare["__color"]), field
+    assert bare["v_" + field] == dashboard.NO_DATA_TEXT, field
+ok("matrix: blank 2026 value draws nothing and hovers as an em-dash", "precinct 1046")
+
+# --- the live CouncilBoundaries contract ---------------------------------
+council = dashboard.fetch_features(dashboard.COUNCIL_LAYER_URL)["features"]
+assert len(council) == 14, len(council)
+assert {f["geometry"]["type"] for f in council} == {"Polygon"}, {
+    f["geometry"]["type"] for f in council
+}
+assert {len(f["geometry"]["coordinates"]) for f in council} == {1}, "single ring expected"
+assert {f["properties"]["DISTRICT"] for f in council} == {str(n) for n in range(1, 15)}, [
+    f["properties"]["DISTRICT"] for f in council
+]
+assert not [k for f in council for k, v in f["properties"].items() if v is None], "null property"
+clons, clats = [], []
+for _f in council:
+    for _ring in _f["geometry"]["coordinates"]:
+        clons += [x[0] for x in _ring]
+        clats += [x[1] for x in _ring]
+# WGS84 as delivered, and inside the county like the precinct layer: f=geojson is
+# what keeps this true, and a native-wkid payload would land outside these bounds.
+assert -97.6 < min(clons) and max(clons) < -96.0, (min(clons), max(clons))
+assert 32.3 < min(clats) and max(clats) < 33.2, (min(clats), max(clats))
+assert dashboard.COUNCIL_LAYER_URL.endswith("f=geojson"), dashboard.COUNCIL_LAYER_URL
+ok("live CouncilBoundaries: 14 single-ring districts, DISTRICT 1-14, WGS84 in county")
+
+# --- council_district_records: parts, holes, and geometry it must ignore ----
+def polygon(rings):
+    return {"type": "Polygon", "coordinates": rings}
+
+def _ring(x0, x1, y0, y1):
+    return [[x0, y0], [x1, y0], [x1, y1], [x0, y1], [x0, y0]]
+
+_sq = _ring(-96.9, -96.8, 32.7, 32.8)
+_hole = _ring(-96.88, -96.85, 32.72, 32.75)
+_recs = dashboard.council_district_records([
+    {"properties": {"DISTRICT": "1"}, "geometry": polygon([_sq, _hole])},
+    {"properties": {"DISTRICT": "2"}, "geometry": {
+        "type": "MultiPolygon", "coordinates": [[[_sq]], [[_hole]]]},
+    },
+    {"properties": {"DISTRICT": "3"}, "geometry": None},
+    {"properties": {"DISTRICT": "4"}, "geometry": {"type": "LineString",
+                                                   "coordinates": _sq}},
+])
+# MultiPolygon -> one record per part (a record carries one ring list, so a
+# single merged record would drop a part); Polygon with a hole -> ONE record that
+# keeps both rings so the inner ring draws.
+assert len(_recs) == 3, _recs
+assert [r["DISTRICT"] for r in _recs] == ["1", "2", "2"], [r["DISTRICT"] for r in _recs]
+assert len(_recs[0]["__rings"]) == 2, "a hole was dropped"
+assert _recs[1]["__rings"] == [[_sq]] and _recs[2]["__rings"] == [[_hole]], _recs
+assert all(isinstance(r["__rings"], list) and r["__rings"] for r in _recs)
+live_recs = dashboard.council_district_records(council)
+assert len(live_recs) == 14, len(live_recs)
+assert all(r["__rings"] for r in live_recs)
+ok("matrix: MultiPolygon splits per part, holes keep every ring, odd types ignored")
+
+# --- the deck actually handed to st.pydeck_chart, both layers --------------
+deck2 = dashboard.build_deck(
+    dashboard.decorate(features, rows, dashboard.DEFAULT_CHOROPLETH),
+    template, features, live_recs,
+)
+blob2 = json.loads(deck2.to_json())
+assert len(blob2["layers"]) == 2, len(blob2["layers"])
+assert [la["id"] for la in blob2["layers"]] == [
+    dashboard.LAYER_ID, dashboard.COUNCIL_LAYER_ID
+], [la["id"] for la in blob2["layers"]]
+precinct_layer, district_layer = blob2["layers"]
+# The overlay must not disturb the precinct layer at all: same props as before.
+assert {k: v for k, v in precinct_layer.items() if k != "data"} == {
+    k: v for k, v in emitted.items() if k != "data"
+}, [
+    k for k in set(precinct_layer) | set(emitted)
+    if k != "data" and precinct_layer.get(k) != emitted.get(k)
+]
+assert district_layer["@@type"] == "PolygonLayer", district_layer
+assert len(district_layer["data"]) == 14, len(district_layer["data"])
+# Decision 2a: outlines only.  Both must be plain booleans -- a string would be
+# `@@=`-marked and read by the browser as a record lookup.
+assert district_layer["filled"] is False, district_layer.get("filled")
+assert district_layer["stroked"] is True, district_layer.get("stroked")
+assert district_layer["getLineColor"] == list(dashboard.COUNCIL_LINE_COLOR), (
+    district_layer.get("getLineColor")
+)
+assert not isinstance(district_layer["getLineColor"], str), (
+    "a colour string is parsed as a JSON expression, not an RGBA list"
+)
+assert len(district_layer["getLineColor"]) == 4, district_layer["getLineColor"]
+assert district_layer["getLineColor"][3] > 0, "an invisible border draws nothing"
+# Zoom-surviving width, in device pixels.
+assert district_layer["lineWidthMinPixels"] == dashboard.COUNCIL_LINE_WIDTH_MIN_PIXELS, (
+    district_layer.get("lineWidthMinPixels")
+)
+assert district_layer["lineWidthMinPixels"] >= 2, district_layer
+# It must not steal precinct picks or hover.
+assert district_layer["pickable"] is False, district_layer.get("pickable")
+assert district_layer.get("autoHighlight") in (None, False), district_layer
+assert "getFillColor" not in district_layer, "an unfilled layer still asks for a fill"
+assert district_layer["getPolygon"] == "@@=__rings", district_layer["getPolygon"]
+assert precinct_layer["pickable"] is True, "the precinct layer lost its pickability"
+assert "tooltip" not in district_layer, "a layer-level tooltip serialises and is never read"
+ok("overlay deck: precinct layer then 14 unfilled stroked districts, non-pickable")
+
+# The grammar sweep now has to cover EVERY emitted layer: a second layer is a
+# second batch of string props the browser will parse, and the old sweep over
+# `blob["layers"][0]` alone would never have looked at it.
+for la in blob2["layers"]:
+    for prop, value in la.items():
+        if isinstance(value, str) and value.startswith("@@="):
+            grammar_ok(value[3:], f"{la['id']}.{prop}")
+        assert not (isinstance(value, str) and "=>" in value), f"{la['id']}.{prop}"
+assert "=>" not in json.dumps(blob2)
+# The "no line props" claim is about the PRECINCT layer only: borders were
+# removed from the choropleth, while the district overlay is a border by design,
+# so scoping this to layer 0 is the assertion, not an oversight.
+assert [k for k in precinct_layer if "line" in k.lower()] == []
+assert "lineWidthMinPixels" in district_layer and "getLineColor" in district_layer
+ok("every string prop on both layers is legal @deck.gl/json grammar")
+assert dashboard.COUNCIL_LAYER_ID == "council_districts"
+
+# The tooltip channel is Deck-level, so it survives the extra layer unchanged --
+# and it still has to be 16 lines with the new figures present.
+shipped2 = _get_pydeck_tooltip(deck2)
+assert shipped2 == shipped and shipped2.get("text") == template, shipped2
+assert "html" not in shipped2 and len(blob2["layers"]) == 2
+assert template.count("\n") == 15 and len(NEW_FIELDS) == 4
+for field in NEW_FIELDS:
+    assert dashboard.label_for(dictionary, field) in template, field
+    assert field not in re.sub(r"\{[^{}]+\}", "", template), field
+ok("tooltip still ships on the Deck channel, 16 lines, with layers[1] present")
+
+# Overlay off => exactly one layer, and no district geometry is attached.
+deck_off = dashboard.build_deck(
+    dashboard.decorate(features, rows[:1], dashboard.DEFAULT_CHOROPLETH),
+    template, features, None,
+)
+assert len(json.loads(deck_off.to_json())["layers"]) == 1
+assert len(dashboard.build_deck(
+    dashboard.decorate(features, rows[:1], dashboard.DEFAULT_CHOROPLETH),
+    template, features, [],
+).layers) == 1, "an empty district record set still added a layer"
+ok("no overlay => precinct layer only")
+
 # --- build-side join: data/raw/precinct_comb.csv, the county results roll-up --
 # These are rows of THIS plan's matrix, and they are build behaviour, not UI
 # behaviour -- so they are asserted on a real rebuild.  `main()` is run with its
@@ -925,6 +1132,7 @@ from streamlit.testing.v1 import AppTest  # noqa: E402
 
 MAIN_SCRIPT = "import dashboard\ndashboard.main()\n"
 ORIG_CACHED = dashboard._cached_features
+ORIG_COUNCIL = dashboard._cached_council_features
 ORIG_PYDECK_CHART = dashboard.st.pydeck_chart
 
 
@@ -945,10 +1153,16 @@ def stub_fc(precincts):
 
 
 def run_app(fc=None, selected=None, timeout=120):
-    """Render main() with the layer and the click both under our control."""
+    """Render main() with the layer, the overlay and the click under our control."""
     dashboard._cached_features = (
         (lambda *a, **k: fc) if fc is not None else ORIG_CACHED
     )
+    # The overlay defaults to "Yes", so every render from here on reaches for
+    # council geometry.  Hand it the 14 features already fetched at :496 instead
+    # of a second live request: these checks are about the precinct layer, the
+    # legend and the click, and an upstream outage would otherwise show up as an
+    # unrelated network hang inside a pre-existing assertion.
+    dashboard._cached_council_features = lambda *a, **k: {"features": council}
     if selected is not None:
         # A real PydeckState from Streamlit's own types, standing in for the
         # chart's return value, so main() runs its actual selected_props(chart)
@@ -961,6 +1175,7 @@ def run_app(fc=None, selected=None, timeout=120):
         at.run()
     finally:
         dashboard._cached_features = ORIG_CACHED
+        dashboard._cached_council_features = ORIG_COUNCIL
         dashboard.st.pydeck_chart = ORIG_PYDECK_CHART
     assert not at.exception, f"app raised {at.exception[0].value if at.exception else ''}"
     return at
@@ -982,6 +1197,187 @@ assert [o for o in side.options] == choropleth_labels, side.options
 assert set(dashboard.CHOROPLETH_FIELDS) < set(dashboard.TOOLTIP_FIELDS), (
     dashboard.CHOROPLETH_FIELDS, dashboard.TOOLTIP_FIELDS
 )
+# --- the overlay drop-down, on the rendered sidebar -----------------------
+# prompt.md:155-156 asks for a drop-down with this exact title defaulting to
+# "Yes", and the plan puts it directly beneath the colour selectbox.  Asserted on
+# the emitted widgets, so a selectbox nobody rendered cannot pass.
+assert [b.label for b in at.selectbox] == [
+    "Colour precincts by", "Show Dallas Council Districts?"
+], [b.label for b in at.selectbox]
+toggle = at.selectbox[1]
+assert toggle.label == "Show Dallas Council Districts?", toggle.label
+assert list(toggle.options) == [dashboard.DISTRICT_ON, dashboard.DISTRICT_OFF], toggle.options
+assert toggle.options[0] == "Yes" and toggle.options[1] == "No", toggle.options
+assert toggle.value == "Yes", toggle.value
+assert at.sidebar.selectbox[-1] is toggle, "the toggle is not in the sidebar"
+ok('sidebar renders "Show Dallas Council Districts?" defaulting to "Yes"')
+
+# --- the deck handed to st.pydeck_chart, spied at the call site ------------
+# AppTest gives us the widget tree but not the Deck object, so spy on the chart
+# call itself: `hasattr`-style guards on main() would pass against a map that
+# never reached the render stream.
+council_calls = []
+
+
+def _spy(payload=None):
+    """Patch the fetch + the chart; return the list the spy appended decks to."""
+    seen = []
+
+    # Named `council_fetch`, not `council`: this helper must not bind the name
+    # `council` in its own scope, or the closure below would read `_spy`'s local
+    # and hand the app a callable instead of the 14-feature list asserted at
+    # :496 -- the overlay then raises inside its own guard and silently drops.
+    def council_fetch(*_a, **_k):
+        council_calls.append(1)
+        if payload is not None and not isinstance(payload, dict):
+            raise payload
+        return payload if payload is not None else {"features": council}
+
+    dashboard._cached_council_features = council_fetch
+
+    def chart(deck_arg, *_a, **_k):
+        seen.append(deck_arg)
+        return None
+
+    dashboard.st.pydeck_chart = chart
+    return seen
+
+
+def _render(timeout=120):
+    _at = AppTest.from_string(MAIN_SCRIPT)
+    _at.default_timeout = timeout
+    _at.run()
+    assert not _at.exception, f"app raised {_at.exception[0].value if _at.exception else ''}"
+    return _at
+
+
+try:
+    dashboard._cached_features = lambda *_a, **_k: stub_fc(["1045", "1046"])
+    seen = _spy()
+    at_on = _render()
+    assert len(seen) == 1, f"expected one chart call, got {len(seen)}"
+    on_layers = json.loads(seen[0].to_json())["layers"]
+    assert [la["id"] for la in on_layers] == [dashboard.LAYER_ID, dashboard.COUNCIL_LAYER_ID], (
+        [la["id"] for la in on_layers]
+    )
+    assert len(on_layers[1]["data"]) == 14, len(on_layers[1]["data"])
+    # AC4/AC3 at the render boundary: the props that keep the overlay from
+    # stealing a precinct pick or a hover have to hold on the deck actually
+    # handed to st.pydeck_chart, not only on one built directly in-process.
+    assert on_layers[1]["pickable"] is False, on_layers[1].get("pickable")
+    assert on_layers[1]["filled"] is False, on_layers[1].get("filled")
+    assert on_layers[1]["stroked"] is True, on_layers[1].get("stroked")
+    assert "tooltip" not in on_layers[1], "a layer tooltip serialises and is never read"
+    assert on_layers[0]["pickable"] is True, "the precinct layer lost its pickability"
+    assert len(council_calls) == 1, council_calls
+    assert not at_on.warning, [w.value for w in at_on.warning]
+    # 16 hover lines, one per tooltip field plus the precinct id.
+    assert _get_pydeck_tooltip(seen[0])["text"].count("\n") == len(
+        dashboard.TOOLTIP_FIELDS
+    )
+
+    # Toggle to "No": precinct layer only, and NO council request at all.  The
+    # call count is the proof -- a fetch-and-discard would leave it incremented.
+    before = len(council_calls)
+    at_on.selectbox[1].set_value("No")
+    at_on.run()
+    off_layers = json.loads(seen[-1].to_json())["layers"]
+    assert [la["id"] for la in off_layers] == [dashboard.LAYER_ID], [
+        la["id"] for la in off_layers
+    ]
+    assert len(off_layers) == 1, len(off_layers)
+    assert len(council_calls) == before, (
+        f"the overlay was fetched anyway ({len(council_calls) - before} extra calls) "
+        "just to be thrown away"
+    )
+    ok('toggle "No" => precinct-only deck and zero council requests',
+       f"{len(council_calls)} calls total")
+
+    # Back to "Yes" re-arms the overlay.
+    at_on.selectbox[1].set_value("Yes")
+    at_on.run()
+    assert len(json.loads(seen[-1].to_json())["layers"]) == 2
+    assert len(council_calls) == before + 1, council_calls
+    ok('toggle back to "Yes" restores the district layer')
+
+    # AC4: a click resolves identically with the overlay on.  The district layer
+    # is not pickable, so it contributes no object to the selection and the
+    # detail panel is unchanged.
+    dashboard.st.pydeck_chart = lambda deck_arg, *_a, **_k: pydeck_state(
+        {dashboard.LAYER_ID: [{dashboard.JOIN_LAYER_KEY: "1045"}]}
+    )
+    at_click = _render()
+    assert len(at_click.dataframe) == 1, "click with the overlay on rendered no detail table"
+    assert len(at_click.dataframe[0].value) == 17, at_click.dataframe[0].value.shape
+    ok("click resolves the same detail panel with the overlay on", "17 metrics")
+
+    # Matrix row "Council endpoint down": one warning naming the URL, the
+    # precinct map still rendered, no traceback, and no st.error stealing the
+    # place of the existing precinct path.
+    seen = _spy(OSError("council service down"))
+    at_bad = _render()
+    assert len(at_bad.warning) == 1, [w.value for w in at_bad.warning]
+    assert dashboard.COUNCIL_LAYER_URL in at_bad.warning[0].value, at_bad.warning[0].value
+    assert "CouncilBoundaries" in at_bad.warning[0].value, at_bad.warning[0].value
+    assert not at_bad.error, [e.value for e in at_bad.error]
+    assert not at_bad.exception
+    assert len(seen) == 1, f"the map stopped rendering: {len(seen)} chart calls"
+    bad_layers = json.loads(seen[0].to_json())["layers"]
+    assert [la["id"] for la in bad_layers] == [dashboard.LAYER_ID], bad_layers
+    assert len(at_bad.html) == 1, "the legend vanished with the overlay"
+    ok("matrix: council fetch raises -> one warning naming its URL, map still renders")
+finally:
+    dashboard._cached_features = ORIG_CACHED
+    dashboard._cached_council_features = ORIG_COUNCIL
+    dashboard.st.pydeck_chart = ORIG_PYDECK_CHART
+
+# The offline path must stay exactly one st.error, and must not reach for the
+# council layer at all -- the district fetch sits after that early return.
+_offline_calls = []
+def _precinct_layer_down(*_a, **_k):
+    raise OSError("network down")
+
+
+dashboard._cached_features = _precinct_layer_down
+dashboard._cached_council_features = lambda *_a, **_k: _offline_calls.append(1)
+dashboard.st.pydeck_chart = lambda *_a, **_k: None
+try:
+    at_off = _render(timeout=60)
+finally:
+    dashboard._cached_features = ORIG_CACHED
+    dashboard._cached_council_features = ORIG_COUNCIL
+    dashboard.st.pydeck_chart = ORIG_PYDECK_CHART
+assert len(at_off.error) == 1, f"expected one clear error, got {len(at_off.error)}"
+assert dashboard.LAYER_URL in at_off.error[0].value
+assert not at_off.warning, [w.value for w in at_off.warning]
+assert _offline_calls == [], "the precinct layer being down must not fetch council geometry"
+ok("offline path unchanged: one st.error, no warning, no council request")
+
+# AC2 for a NEW colourable field, asserted on the emitted payload rather than a
+# legend string built in-process: `legend_html` is field-agnostic, so proving it
+# assembles a percent proves nothing about the render stream -- the exact shape
+# of the shipped defects this file exists to catch.  It also sits deliberately
+# ABOVE the known caption failure below, so it actually runs.
+share_field = "2026_gov_percent_Hinojosa"
+share_label = dashboard.label_for(dictionary, share_field)
+at6 = run_app()
+at6.selectbox[0].set_value(share_label)
+at6.run()
+share_domain = dashboard.field_domain(rows, share_field)
+assert dashboard.domain_is_share(share_domain), share_domain
+assert len(at6.html) == 1, f"expected one legend block, got {len(at6.html)}"
+rendered_legend = at6.html[0].value
+assert rendered_legend == dashboard.legend_html(share_domain), "legend did not follow the field"
+assert [t.value for t in at6.title] == [share_label], at6.title
+for endpoint in share_domain:
+    pct = dashboard.format_value(endpoint, True)
+    assert pct.endswith("%") and pct in rendered_legend, (endpoint, pct, rendered_legend)
+# the default metric's endpoints must be gone, not merely superseded below
+_default_domain = dashboard.field_domain(rows, dashboard.DEFAULT_CHOROPLETH)
+assert dashboard.format_value(_default_domain[1], True) not in rendered_legend
+assert dashboard.format_value(_default_domain[0], True) not in rendered_legend
+ok("a new 2026 field renders a percent legend from its own range", share_label)
+
 expected_colored = populated[dashboard.DEFAULT_CHOROPLETH]
 expected_remaining = stats["polygons"] - expected_colored
 coverage = f"{expected_colored} of {stats['polygons']} polygons are coloured by"
