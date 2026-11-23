@@ -149,7 +149,8 @@ def raw_populated_codes(field, codes):
 # --- dictionary coverage: every field the dashboard touches is documented ----
 all_needed = (
     dashboard.CHOROPLETH_FIELDS + dashboard.TOOLTIP_FIELDS
-    + dashboard.DETAIL_FIELDS + [dashboard.JOIN_CSV_KEY]
+    + dashboard.DETAIL_FIELDS + dashboard.RESULTS_PANEL_FIELDS
+    + [dashboard.JOIN_CSV_KEY]
 )
 missing = [f for f in all_needed if f not in dictionary]
 assert not missing, f"undocumented fields: {missing}"
@@ -1657,6 +1658,8 @@ ok("basemap is a MapLibre style URL string, keyless", dashboard.MAP_STYLE_URL)
 # render-time rows are asserted on the widgets the app actually emitted --
 # never on a `hasattr` guard that can silently skip them.
 from streamlit.testing.v1 import AppTest  # noqa: E402
+from streamlit.testing.v1.element_tree import Block  # noqa: E402
+from streamlit.proto.Block_pb2 import Block as BlockProto  # noqa: E402
 
 MAIN_SCRIPT = "import dashboard\ndashboard.main()\n"
 ORIG_CACHED = dashboard._cached_features
@@ -1707,6 +1710,54 @@ def run_app(fc=None, selected=None, timeout=120):
         dashboard.st.pydeck_chart = ORIG_PYDECK_CHART
     assert not at.exception, f"app raised {at.exception[0].value if at.exception else ''}"
     return at
+
+
+def panel_blocks(at):
+    """{panel heading -> the child nodes of that panel's column}, in paint order.
+
+    Positional `at.dataframe[0]` cannot be trusted here: `st.dataframe(key=...)`
+    does not surface a `.key` to AppTest (verified: both come back None), so index
+    order is the only positional handle and it silently follows whatever order
+    `_detail_panels` writes its columns in.  Swapping the two columns -- a purely
+    presentational edit -- would then hand each check the *other* panel's table and
+    every assertion below would still pass against the wrong data.  Resolving by the
+    heading each panel renders keeps a swap a layout question, not a correctness one.
+
+    A panel that rendered `st.info` instead of a table (no click, or a crosswalk-less
+    polygon) contributes nothing here, so `panel_blocks(at) == {}` is the assertion
+    for "no table", not a KeyError.
+    """
+    out = {}
+    for block in at.main:
+        if not isinstance(block, Block) or block.type != "flex_container":
+            continue
+        for col in block.children.values():
+            if not isinstance(col, Block) or col.type != "column":
+                continue
+            kids = list(col.children.values())
+            if kids and kids[0].type == "subheader":
+                out[kids[0].value] = kids
+    return out
+
+
+def panel_tables(at):
+    """{panel heading -> its rendered dataframe}, or absent if it shows no table."""
+    tables = {}
+    for heading, kids in panel_blocks(at).items():
+        kinds = [g.type for g in kids]
+        if "dataframe" in kinds:
+            tables[heading] = kids[kinds.index("dataframe")].value
+    return tables
+
+
+def panel_captions(at):
+    """{panel heading -> its caption text}, for panels that rendered one."""
+    out = {}
+    for heading, kids in panel_blocks(at).items():
+        kinds = [g.type for g in kids]
+        if "caption" in kinds:
+            out[heading] = kids[kinds.index("caption")].value
+    return out
 
 
 # Default load: colour field, coverage caption, populated count of 791, all on
@@ -1762,8 +1813,9 @@ assert set(_probe_codes) <= set(_FULL) | set(_BLANK)
 for _c in _probe_codes:
     _want_blank = _c in _BLANK
     _at = run_app(fc=stub_fc([_c]), selected={dashboard.JOIN_LAYER_KEY: _c})
-    assert len(_at.dataframe) == 1, f"{_c}: the panel rendered no table"
-    _frame = _at.dataframe[0].value
+    _tables = panel_tables(_at)
+    assert len(_at.dataframe) == 2, f"{_c}: expected both detail panels, got {len(_at.dataframe)}"
+    _frame = _tables[dashboard.DEMOGRAPHICS_PANEL_HEADING]
     assert list(_frame.columns) == ["Metric", "Value"], _frame.columns
     assert len(_frame) == 17, (_c, len(_frame))
     assert list(_frame["Metric"]) == _labels, (_c, list(_frame["Metric"]))
@@ -1931,9 +1983,15 @@ try:
         {dashboard.LAYER_ID: [{dashboard.JOIN_LAYER_KEY: "1045"}]}
     )
     at_click = _render()
-    assert len(at_click.dataframe) == 1, "click with the overlay on rendered no detail table"
-    assert len(at_click.dataframe[0].value) == 17, at_click.dataframe[0].value.shape
-    ok("click resolves the same detail panel with the overlay on", "17 metrics")
+    _click_tables = panel_tables(at_click)
+    assert len(at_click.dataframe) == 2, "click with the overlay on rendered both detail panels"
+    assert len(_click_tables[dashboard.DEMOGRAPHICS_PANEL_HEADING]) == len(panel), \
+        _click_tables[dashboard.DEMOGRAPHICS_PANEL_HEADING].shape
+    assert len(_click_tables[dashboard.RESULTS_PANEL_HEADING]) == \
+        len(dashboard.RESULTS_PANEL_FIELDS), \
+        _click_tables[dashboard.RESULTS_PANEL_HEADING].shape
+    ok("click resolves the same two panels with the overlay on",
+       f"{len(panel)} + {len(dashboard.RESULTS_PANEL_FIELDS)} metrics")
 
     # Matrix row "Council endpoint down": one warning naming the URL, the
     # precinct map still rendered, no traceback, and no st.error stealing the
@@ -1976,6 +2034,232 @@ assert dashboard.LAYER_URL in at_off.error[0].value
 assert not at_off.warning, [w.value for w in at_off.warning]
 assert _offline_calls == [], "the precinct layer being down must not fetch council geometry"
 ok("offline path unchanged: one st.error, no warning, no council request")
+
+# ===========================================================================
+# The two detail panels -- side by side, on the rendered tree
+# ===========================================================================
+# Placed HERE, above the known caption abort, for the reason this file already
+# records at :818: a check sitting below that failure never runs.  Everything the
+# single-panel layout used to assert is restated against the two-panel one, and
+# asserted on emitted elements rather than on `detail_records` return values.
+_panels = run_app(fc=stub_fc(["1045"]), selected={dashboard.JOIN_LAYER_KEY: "1045"})
+_panel_tables = panel_tables(_panels)
+assert len(_panels.dataframe) == 2, (
+    f"expected two detail tables, got {len(_panels.dataframe)}")
+# Compared as a set, not a sequence: which panel sits left is a layout choice
+# (`_detail_panels` authors results first), and pinning the order here would fail a
+# swap that breaks nothing the prompt asked for.  What has to hold is that BOTH
+# headings exist and each carries its own table.
+assert set(_panel_tables) == {
+    dashboard.DEMOGRAPHICS_PANEL_HEADING, dashboard.RESULTS_PANEL_HEADING
+}, sorted(_panel_tables)
+assert not any("Precinct detail" in s.value for s in _panels.subheader), \
+    "the old single heading is back"
+ok("clicked precinct renders both panels under their own headings, no stale heading")
+
+# Side-by-side is a layout claim, so it is asserted on the flex container
+# st.columns actually emitted -- two equal columns in one HORIZONTAL row.  A bare
+# `len(dataframe) == 2` would pass for two panels stacked full-width, which is the
+# reading the prompt rules out.  `wrap` is what lets the same call stack below a
+# 640px viewport, so there is no second code path to keep honest.
+_rows = [
+    b for b in _panels.main
+    if isinstance(b, Block) and b.type == "flex_container"
+    and len([c for c in b.children.values() if isinstance(c, Block) and c.type == "column"]) == 2
+]
+assert len(_rows) == 1, [
+    (b.type, [getattr(c, "type", type(c).__name__) for c in b.children.values()])
+    for b in _panels.main if isinstance(b, Block)
+]
+_dir = BlockProto.FlexContainer.Direction
+assert _rows[0].proto.flex_container.direction == _dir.HORIZONTAL
+assert _rows[0].proto.flex_container.wrap, "columns cannot stack on a narrow viewport"
+# `Block.children` is a dict keyed by write position, so `.values()` is paint order.
+# The row's own shape is what's pinned here -- two equal columns in one horizontal
+# row -- not which heading lands left, so the panel contents are keyed by heading.
+_cols = list(_rows[0].children.values())
+assert [c.type for c in _cols] == ["column", "column"], [c.type for c in _cols]
+for _col in _cols:
+    # `Column.proto` IS the BlockProto.Column (weight + gap_config), not a Block
+    # wrapper, so equal halves read off `.weight` -- st.columns(2) gives 0.5 each.
+    assert _col.weight == 0.5, _col.weight
+    assert [g.type for g in _col.children.values()] == \
+        ["subheader", "caption", "dataframe"], \
+        [g.type for g in _col.children.values()]
+assert set(panel_blocks(_panels)) == {
+    dashboard.DEMOGRAPHICS_PANEL_HEADING, dashboard.RESULTS_PANEL_HEADING
+}, sorted(panel_blocks(_panels))
+_panel_captions = panel_captions(_panels)
+assert _panel_captions[dashboard.DEMOGRAPHICS_PANEL_HEADING] == \
+    f"Precinct 1045 -- {len(panel)} metrics", _panel_captions
+assert _panel_captions[dashboard.RESULTS_PANEL_HEADING] == (
+    f"Precinct 1045 -- {len(dashboard.RESULTS_PANEL_FIELDS)} metrics"
+), _panel_captions
+ok("two equal-width columns in one horizontal, wrappable row",
+   f"{len(panel)} | {len(dashboard.RESULTS_PANEL_FIELDS)} metrics")
+
+# The results panel lists RESULTS_PANEL_FIELDS in its own order.  Where the two
+# lists overlap the panel must still agree with the hover card cell for cell --
+# that cross-surface check is the whole reason `decorate` and the panel share
+# `format_value`/`fraction_flags` -- but it is driven from the PANEL's list, so it
+# keeps meaning something once the lists are edited apart.
+_results = panel_tables(_panels)[dashboard.RESULTS_PANEL_HEADING]
+assert list(_results.columns) == ["Metric", "Value"], _results.columns
+assert list(_results["Metric"]) == [
+    dashboard.label_for(dictionary, f) for f in dashboard.RESULTS_PANEL_FIELDS
+], list(_results["Metric"])
+assert not [f for f in dashboard.RESULTS_PANEL_FIELDS if f in " ".join(_results["Metric"])], \
+    "raw field name in the results panel"
+_rec1045 = next(
+    r for r in dashboard.decorate(stub_fc(["1045"])["features"], rows,
+                                  dashboard.DEFAULT_CHOROPLETH))
+_cells = dict(zip(_results["Metric"], _results["Value"]))
+_shared = [f for f in dashboard.RESULTS_PANEL_FIELDS if f in dashboard.TOOLTIP_FIELDS]
+assert _shared, "the two lists share no field, so the cross-surface check is vacuous"
+_diverged = [
+    (f, _cells[dashboard.label_for(dictionary, f)], _rec1045["v_" + f])
+    for f in _shared
+    if _cells[dashboard.label_for(dictionary, f)] != _rec1045["v_" + f]
+]
+assert not _diverged, f"results panel disagrees with the tooltip: {_diverged}"
+# And every panel cell is the extract's own value, formatted with the panel's own
+# share/count decision -- read off the CSV row, not off a tooltip key, since the
+# panel no longer depends on `decorate` writing anything.
+_row1045 = index["1045"]
+_mismatch = []
+for f in dashboard.RESULTS_PANEL_FIELDS:
+    _want = dashboard.format_value(
+        dashboard.to_float(_row1045.get(f)),
+        fraction=dashboard.domain_is_share(dashboard.field_domain(rows, f)),
+    )
+    if _cells[dashboard.label_for(dictionary, f)] != _want:
+        _mismatch.append((f, _cells[dashboard.label_for(dictionary, f)], _want))
+assert not _mismatch, f"panel value is not the extract's value: {_mismatch}"
+# Counts stay counts, shares stay shares, decided from the extract's range -- the
+# same rule the tooltip applies, so `canvass_attempts` cannot read "100.0%" here.
+for _count_field in ("canvass_attempts", "response_count", "strong_no"):
+    _v = _cells[dashboard.label_for(dictionary, _count_field)]
+    assert "%" not in _v, f"{_count_field} rendered as a share: {_v}"
+for _share_field in ("prop_a_city_no_canvassing_pct", "response_rate",
+                     "2026_gov_percent_Hinojosa"):
+    _v = _cells[dashboard.label_for(dictionary, _share_field)]
+    assert _v == dashboard.NO_DATA_TEXT or _v.endswith("%"), \
+        f"{_share_field} rendered as a count: {_v}"
+ok("results panel follows its own field list, values agreeing with the extract "
+   "and with the tooltip", f"{len(dashboard.RESULTS_PANEL_FIELDS)} metrics, "
+   f"{len(_shared)} shared with hover")
+
+# --- the lists are genuinely independent, not merely separately named --------
+# A shared alias or a derived copy would pass every check above.  So: move one field
+# onto the panel only and one off it, and require the HOVER card not to move.  Both
+# surfaces are driven through the app, and the tooltip is read out of the deck that
+# actually reached st.pydeck_chart -- asserting the string `tooltip_template` builds
+# in-process would prove nothing about what the browser got.
+_TOOLTIP_ONLY, _PANEL_ONLY = "2020_percent_Other", "2024_percent_Against_R"
+assert _TOOLTIP_ONLY in dashboard.TOOLTIP_FIELDS
+assert _TOOLTIP_ONLY in dashboard.RESULTS_PANEL_FIELDS
+assert _PANEL_ONLY in dictionary and _PANEL_ONLY not in dashboard.TOOLTIP_FIELDS
+assert dashboard.to_float(index["1045"].get(_PANEL_ONLY)) is not None, _PANEL_ONLY
+
+_seen_decks = []
+
+
+def _spy_chart(deck_arg, *_a, **_k):
+    _seen_decks.append(deck_arg)
+    return pydeck_state({dashboard.LAYER_ID: [{dashboard.JOIN_LAYER_KEY: "1045"}]})
+
+
+_ORIG_TIP = list(dashboard.TOOLTIP_FIELDS)
+_ORIG_PANEL = list(dashboard.RESULTS_PANEL_FIELDS)
+try:
+    dashboard.TOOLTIP_FIELDS = _ORIG_TIP + [_TOOLTIP_ONLY]
+    dashboard.RESULTS_PANEL_FIELDS = [
+        f for f in _ORIG_PANEL if f != _TOOLTIP_ONLY
+    ] + [_PANEL_ONLY]
+    # NOT run_app(): it installs its own chart stub in `if selected is not None`
+    # and restores ORIG_PYDECK_CHART in its finally, which would silently discard
+    # the deck recorder.  `_render` leaves the chart alone, so the spy survives.
+    dashboard._cached_features = lambda *a, **k: stub_fc(["1045"])
+    dashboard._cached_council_features = lambda *a, **k: {"features": []}
+    dashboard.st.pydeck_chart = _spy_chart
+    _split = _render(timeout=120)
+    _split_tables = panel_tables(_split)
+
+    # Panel: gained the panel-only field, lost the tooltip-only one.
+    _split_metrics = list(_split_tables[dashboard.RESULTS_PANEL_HEADING]["Metric"])
+    assert dashboard.label_for(dictionary, _PANEL_ONLY) in _split_metrics, _split_metrics
+    assert dashboard.label_for(dictionary, _TOOLTIP_ONLY) not in _split_metrics, _split_metrics
+    assert len(_split_tables[dashboard.RESULTS_PANEL_HEADING]) == len(
+        dashboard.RESULTS_PANEL_FIELDS), len(_split_tables[dashboard.RESULTS_PANEL_HEADING])
+
+    # Tooltip: gained its own field, and still lists the one the panel dropped.
+    _tip_text = _get_pydeck_tooltip(_seen_decks[-1])["text"]
+    assert len(_tip_text.split("\n")) == len(dashboard.TOOLTIP_FIELDS) + 1, _tip_text
+    assert dashboard.label_for(dictionary, _TOOLTIP_ONLY) in _tip_text, _tip_text
+    assert dashboard.label_for(dictionary, _PANEL_ONLY) not in _tip_text, _tip_text
+    # The `v_` key the new token reads is written by `decorate` off TOOLTIP_FIELDS,
+    # so the added field resolves instead of rendering its own name.
+    _split_rec = next(
+        r for r in dashboard.decorate(stub_fc(["1045"])["features"], rows,
+                                      dashboard.DEFAULT_CHOROPLETH))
+    assert "v_" + _TOOLTIP_ONLY in _split_rec, sorted(_split_rec)[:6]
+
+    # Demographics panel: untouched by either edit -- the third list stays separate.
+    assert list(_split_tables[dashboard.DEMOGRAPHICS_PANEL_HEADING]["Metric"]) == _labels
+finally:
+    dashboard.TOOLTIP_FIELDS = _ORIG_TIP
+    dashboard.RESULTS_PANEL_FIELDS = _ORIG_PANEL
+    dashboard.st.pydeck_chart = ORIG_PYDECK_CHART
+    dashboard._cached_features = ORIG_CACHED
+    dashboard._cached_council_features = ORIG_COUNCIL
+
+# The restore is real, not assumed: re-render and require the original lists back.
+_restored = run_app(fc=stub_fc(["1045"]), selected={dashboard.JOIN_LAYER_KEY: "1045"})
+assert list(panel_tables(_restored)[dashboard.RESULTS_PANEL_HEADING]["Metric"]) == [
+    dashboard.label_for(dictionary, f) for f in _ORIG_PANEL
+], "the mutation leaked past the finally"
+ok("tooltip and results panel move independently, demographics panel never does",
+   f"+{_PANEL_ONLY} panel only, +{_TOOLTIP_ONLY} hover only")
+
+# A crosswalk-less polygon: both panels say so in the rendered st.info channel and
+# neither invents a table.  Half an answer -- one panel blank, one silent -- would
+# read as a rendering bug, so both statements are required.
+_orphan_panel = run_app(fc=stub_fc(["999999"]), selected={dashboard.JOIN_LAYER_KEY: "999999"})
+assert _orphan_panel.dataframe == [], [d.value.shape for d in _orphan_panel.dataframe]
+_orphan_infos = [i.value for i in _orphan_panel.info]
+assert len(_orphan_infos) == 2, _orphan_infos
+assert all("no data in this research extract" in v and "999999" in v
+           for v in _orphan_infos), _orphan_infos
+ok("crosswalk-less polygon -> both panels state no data, no table", "2 st.info")
+
+# No click: both headings still render, both prompt, neither emits an empty table.
+_blank_panel = run_app(fc=stub_fc(["1045"]), selected=None)
+assert _blank_panel.dataframe == [], _blank_panel.dataframe
+assert set(s.value for s in _blank_panel.subheader) == {
+    dashboard.DEMOGRAPHICS_PANEL_HEADING, dashboard.RESULTS_PANEL_HEADING
+}, [s.value for s in _blank_panel.subheader]
+_blanks = [i.value for i in _blank_panel.info]
+assert len(_blanks) == 2 and all("Click a precinct" in v for v in _blanks), _blanks
+assert any("demographics" in v for v in _blanks) and any("results" in v for v in _blanks), _blanks
+ok("no click -> both headings, two prompts, no empty table")
+
+# A precinct the extract carries but never canvassed: the results panel shows the
+# blank fields as NO_DATA_TEXT and keeps the 2026 figures it does have -- never a
+# zero for a cell the source left empty.
+_blank_canvass = next(
+    c for c in sorted(index)
+    if dashboard.to_float(index[c].get("prop_a_city_no_canvassing_pct")) is None
+    and dashboard.to_float(index[c].get("2026_gov_percent_Hinojosa")) is not None
+)
+_partial = run_app(fc=stub_fc([_blank_canvass]),
+                   selected={dashboard.JOIN_LAYER_KEY: _blank_canvass})
+_pframe = panel_tables(_partial)[dashboard.RESULTS_PANEL_HEADING]
+_pcells = dict(zip(_pframe["Metric"], _pframe["Value"]))
+assert _pcells[dashboard.label_for(dictionary, "prop_a_city_no_canvassing_pct")] \
+    == dashboard.NO_DATA_TEXT, _blank_canvass
+_hino = _pcells[dashboard.label_for(dictionary, "2026_gov_percent_Hinojosa")]
+assert _hino != dashboard.NO_DATA_TEXT and _hino != "0", (_blank_canvass, _hino)
+ok("blank canvass field stays an em-dash beside its real 2026 figures", _blank_canvass)
 
 # AC2 for a NEW colourable field, asserted on the emitted payload rather than a
 # legend string built in-process: `legend_html` is field-agnostic, so proving it
@@ -2069,11 +2353,14 @@ order = [stream.index(p) for p in ("title", "deck_gl_json_chart", "html", "capti
 assert order == sorted(order), f"legend is out of place: {stream}"
 ok("render order is title, map, legend, captions")
 
-# No selection yet: a prompt, and no empty table.
+# No selection yet: both panels prompt, neither renders an empty table.
 assert at.dataframe == [], f"detail table rendered with no click: {at.dataframe}"
 assert any("Click a precinct" in i.value for i in at.info), [i.value for i in at.info]
-assert any("Precinct detail" in s.value for s in at.subheader)
-ok("no selection -> prompt to click, no empty table")
+assert set(s.value for s in at.subheader) == {
+    dashboard.DEMOGRAPHICS_PANEL_HEADING, dashboard.RESULTS_PANEL_HEADING
+}, [s.value for s in at.subheader]
+assert not any("Precinct detail" in s.value for s in at.subheader), "the old single heading is back"
+ok("no selection -> both panel headings, two prompts, no empty table")
 
 # 707 of 791 polygons hold no CSV row; each still carries an em-dash per field.
 decorated = dashboard.decorate(features, rows, dashboard.DEFAULT_CHOROPLETH)
@@ -2129,8 +2416,8 @@ ok("legend handles a single-valued field and a field with no values at all")
 # Click a polygon whose precinct is in the CSV: 17 labeled metrics, no raw names.
 clicked = {dashboard.JOIN_LAYER_KEY: "1045"}
 at3 = run_app(fc=stub_fc(["1045"]), selected=clicked)
-assert len(at3.dataframe) == 1, "click on a CSV precinct rendered no detail table"
-frame = at3.dataframe[0].value
+assert len(at3.dataframe) == 2, "click on a CSV precinct rendered no detail table"
+frame = panel_tables(at3)[dashboard.DEMOGRAPHICS_PANEL_HEADING]
 assert list(frame.columns) == ["Metric", "Value"], frame.columns
 assert len(frame) == 17, len(frame)
 shown = " ".join(frame["Metric"])
@@ -2141,6 +2428,10 @@ for field in panel:
 for field in dashboard.NO_DATA_FIELDS:
     assert dashboard.label_for(dictionary, field) not in shown, field
 ok("click polygon -> detail renders the 17 corrected labels and omits the 9 no-data fields")
+
+# The two panels' field lists, values and layout are asserted up at the
+# "detail panels" block, deliberately placed ABOVE the known caption abort: a
+# check sitting below it never runs, which is what let four earlier defects ship.
 
 # Click a polygon with no CSV row: a statement, not a traceback, not a table.
 at4 = run_app(fc=stub_fc(["999999"]), selected={dashboard.JOIN_LAYER_KEY: "999999"})
@@ -2162,9 +2453,17 @@ finally:
 assert not at5.exception, f"offline path raised a traceback: {at5.exception}"
 assert len(at5.error) == 1, f"expected one clear error, got {len(at5.error)}"
 assert dashboard.LAYER_URL in at5.error[0].value, at5.error[0].value
-assert len(at5.dataframe) == 1, "joined-field UI did not render offline"
-assert len(at5.dataframe[0].value) == 17, at5.dataframe[0].value.shape
-ok("layer unreachable -> one st.error naming the URL, joined fields still render")
+assert len(at5.dataframe) == 2, "joined-field UI did not render both panels offline"
+_at5_tables = panel_tables(at5)
+assert len(_at5_tables[dashboard.DEMOGRAPHICS_PANEL_HEADING]) == len(panel), \
+    _at5_tables[dashboard.DEMOGRAPHICS_PANEL_HEADING].shape
+assert len(_at5_tables[dashboard.RESULTS_PANEL_HEADING]) == \
+    len(dashboard.RESULTS_PANEL_FIELDS), \
+    _at5_tables[dashboard.RESULTS_PANEL_HEADING].shape
+assert set(s.value for s in at5.subheader) == {
+    dashboard.DEMOGRAPHICS_PANEL_HEADING, dashboard.RESULTS_PANEL_HEADING
+}, [s.value for s in at5.subheader]
+ok("layer unreachable -> one st.error naming the URL, both panels still render")
 
 # The title is chosen before the layer is fetched, so it still names the metric
 # offline.  The legend keys the MAP's ramp and there is no map, so none renders:

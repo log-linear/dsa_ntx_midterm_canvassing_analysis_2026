@@ -2,9 +2,12 @@
 
 Draws the county's 2026 election precincts as a pydeck choropleth, joins
 data/precinct_data.csv onto each polygon on `NewPrcnt` <->
-`dallas_county_precinct_number`, and turns a clicked precinct into a
-demographic detail panel.  Every metric is labelled with its `readable_name`
-from data/data_dictionary.csv -- never the raw field name.
+`dallas_county_precinct_number`, and turns a clicked precinct into two
+side-by-side detail panels: `Precinct results` (RESULTS_PANEL_FIELDS) and
+`Precinct Demographics (estimated)` (DETAIL_FIELDS, narrowed to the populated
+ones).  Hovering shows TOOLTIP_FIELDS, which is its own list: the panel and the
+tooltip are adjusted independently.  Every metric is labelled with its
+`readable_name` from data/data_dictionary.csv -- never the raw field name.
 
 The extract carries a row for every precinct the VTD crosswalk can attribute,
 not only the precincts a canvass workbook named, so the detail panel resolves a
@@ -67,6 +70,31 @@ CHOROPLETH_FIELDS = [
     "2026_prop_county_percent_For",
 ]
 TOOLTIP_FIELDS = [
+]
+DEFAULT_CHOROPLETH = "prop_a_city_no_canvassing_pct"
+
+# The two clicked-precinct panels, side by side, results first.  The headings are
+# view titles, not metric labels -- metric names all come out of the data
+# dictionary, but no field owns a panel's title, so these are the only user-visible
+# strings defined here.
+DEMOGRAPHICS_PANEL_HEADING = "Precinct Demographics (estimated)"
+RESULTS_PANEL_HEADING = "Precinct results"
+
+# The fields the `Precinct results` panel lists, authored here and ONLY here.  It
+# starts as a copy of TOOLTIP_FIELDS -- the panel was introduced as "what hovering
+# shows" -- but these are two separate lists on purpose so either can be adjusted
+# without moving the other: nothing derives one from the other, `tooltip_template`
+# and `decorate` read TOOLTIP_FIELDS while `_detail_panels` reads this one, and
+# `fraction_flags` is handed each list explicitly rather than defaulting.
+#
+# Two consequences of editing them apart, worth knowing:
+#   - A field added HERE needs only a data_dictionary entry; the panel reads the
+#     joined CSV row directly.
+#   - A field added to TOOLTIP_FIELDS additionally needs the `v_<field>` key
+#     `decorate` writes, or its token renders as its own name.
+# Colourable fields still have to stay in TOOLTIP_FIELDS: that is the tooltip's
+# contract, and nothing here changes it.
+RESULTS_PANEL_FIELDS = [
     "prop_a_city_no_canvassing_pct",
     "canvass_attempts",
     "response_rate",
@@ -78,16 +106,11 @@ TOOLTIP_FIELDS = [
     "2020_percent_Sanders",
     "2020_percent_Biden",
     "2020_percent_Other",
-    # The four colourable 2026 result shares land last: the existing 11 keep
-    # their hover order and the new figures append to it.  Colourable stays a
-    # strict subset of hover -- `decorate` writes a `v_<field>` key per tooltip
-    # field only, so a colourable field missing here has no key to read.
     "2026_gov_percent_Hinojosa",
     "2026_sen_percent_Talarico",
     "2026_prop_city_percent_Against",
     "2026_prop_county_percent_For",
 ]
-DEFAULT_CHOROPLETH = "prop_a_city_no_canvassing_pct"
 
 # The 26 detail fields from the plan, in display order.  Decision 1c narrows
 # this to the ones that actually carry data (see `detail_panel_fields`), which
@@ -448,8 +471,9 @@ def decorate(
     domain = field_domain(rows, field)
     # Whether each tooltip field holds a share (0-1) or a count, decided once per
     # field from the whole extract -- never per value.  Outside the feature loop so
-    # 791 polygons do not each re-scan all 820 rows.
-    tooltip_domains = {f: field_domain(rows, f) for f in TOOLTIP_FIELDS}
+    # 791 polygons do not each re-scan all 820 rows.  Scoped to TOOLTIP_FIELDS: the
+    # results panel computes its own from RESULTS_PANEL_FIELDS.
+    tooltip_fractions = fraction_flags(rows, TOOLTIP_FIELDS)
     records = []
     for feature in features:
         geometry = feature.get("geometry") or {}
@@ -469,7 +493,7 @@ def decorate(
         for shown in TOOLTIP_FIELDS:
             record["v_" + shown] = format_value(
                 None if row is None else to_float(row.get(shown)),
-                fraction=domain_is_share(tooltip_domains[shown]),
+                fraction=tooltip_fractions[shown],
             )
         records.append(record)
     return records
@@ -506,16 +530,40 @@ def council_district_records(features: list[dict[str, Any]]) -> list[dict[str, A
     return records
 
 
+def fraction_flags(rows: list[dict[str, str]], fields: list[str]) -> dict[str, bool]:
+    """Per-field "is this a share (0-1)?" answer, decided once over the extract.
+
+    `fields` is required rather than defaulting to TOOLTIP_FIELDS: the hover card
+    and the `Precinct results` panel are decoupled lists now, so each caller says
+    which one it is formatting.  A column that reads as a percentage on one surface
+    and a raw count on the other is the defect `format_value`'s docstring records,
+    so the decision is made once per surface from the extract's own range.
+    """
+    return {f: domain_is_share(field_domain(rows, f)) for f in fields}
+
+
 def detail_records(
     row: dict[str, str] | None,
     dictionary: dict[str, dict[str, str]],
     fields: list[str],
+    fractions: dict[str, bool] | None = None,
 ) -> list[dict[str, str]]:
-    """The detail panel's rows for one precinct, labelled by readable_name only."""
+    """A detail panel's rows for one precinct, labelled by readable_name only.
+
+    `fractions` carries the share-vs-count decision from `fraction_flags`; left as
+    None it keeps the demographic panel's historical formatting, where every field
+    is a share or a value large enough that `format_value` cannot mistake it for
+    one.
+    """
     if row is None:
         return []
     return [
-        {"Metric": label_for(dictionary, f), "Value": format_value(to_float(row.get(f)))}
+        {
+            "Metric": label_for(dictionary, f),
+            "Value": format_value(
+                to_float(row.get(f)), fraction=True if fractions is None else fractions[f]
+            ),
+        }
         for f in fields
     ]
 
@@ -724,22 +772,65 @@ def selected_props(selection: Any) -> dict[str, Any] | None:
     return None
 
 
-def _detail_block(
+def _detail_panels(
     row: dict[str, str] | None,
-    precinct: str,
+    precinct: str | None,
     dictionary: dict[str, dict[str, str]],
     panel_fields: list[str],
+    result_fractions: dict[str, bool],
 ) -> None:
-    st.subheader("Precinct detail")
-    if row is None:
-        st.info(
-            f"Precinct {precinct} has no data in this research extract, so there "
-            "is nothing to show for it."
+    """The two clicked-precinct views, side by side.
+
+    `st.columns` stacks its columns below a 640px viewport by default, so this is
+    one row of two panels on a desktop and two stacked rows on a phone -- the same
+    call, no breakpoint to maintain.
+
+    Both panels always render their own heading and their own statement of what is
+    missing.  A half-empty row (one panel showing a table while the other silently
+    shows nothing) reads as a rendering bug rather than as absent data, which is the
+    whole reason `NO_DATA_TEXT` exists.
+    """
+    results_col, demographics_col = st.columns(2)
+    with results_col:
+        st.subheader(RESULTS_PANEL_HEADING)
+        _panel_column(
+            row, precinct, dictionary, RESULTS_PANEL_FIELDS, result_fractions, "results"
         )
+    with demographics_col:
+        st.subheader(DEMOGRAPHICS_PANEL_HEADING)
+        _panel_column(
+            row, precinct, dictionary, panel_fields, None, "demographics"
+        )
+
+
+def _panel_column(
+    row: dict[str, str] | None,
+    precinct: str | None,
+    dictionary: dict[str, dict[str, str]],
+    fields: list[str],
+    fractions: dict[str, bool] | None,
+    noun: str,
+) -> None:
+    """One panel: its table, or why it has none.
+
+    `row` None with `precinct` None is "nothing clicked yet"; `row` None with a
+    `precinct` is "clicked a polygon the crosswalk cannot attribute".  The second
+    phrasing stays in the rendered `st.info` channel because the test matrix asserts
+    on what the browser received, not on `detail_records`' return value -- a
+    function that returns [] for a None row proves nothing about the UI.
+    """
+    if row is None:
+        if precinct is None:
+            st.info(f"Click a precinct on the map to see its {noun}.")
+        else:
+            st.info(
+                f"Precinct {precinct} has no data in this research extract, so there "
+                f"is nothing to show for it."
+            )
         return
-    st.caption(f"Precinct {precinct} -- {len(panel_fields)} metrics")
+    st.caption(f"Precinct {precinct} -- {len(fields)} metrics")
     st.dataframe(
-        detail_records(row, dictionary, panel_fields),
+        detail_records(row, dictionary, fields, fractions),
         hide_index=True,
         width="stretch",
     )
@@ -749,9 +840,20 @@ def main() -> None:
     rows = load_rows()
     dictionary = build_dictionary()
     # Fail fast, before anything renders, if the dictionary cannot name a field.
-    labels = {f: label_for(dictionary, f) for f in CHOROPLETH_FIELDS + DETAIL_FIELDS}
+    # TOOLTIP_FIELDS (hover) and RESULTS_PANEL_FIELDS (panel) are listed separately
+    # because they are separate lists: each surface needs its own fields documented,
+    # and neither one is derived from the other.
+    labels = {
+        f: label_for(dictionary, f)
+        for f in CHOROPLETH_FIELDS + DETAIL_FIELDS + TOOLTIP_FIELDS
+        + RESULTS_PANEL_FIELDS
+    }
     tooltip = tooltip_template(dictionary)
     panel_fields = detail_panel_fields(rows)
+    # The results panel's own share/count decisions, over its own field list. The
+    # hover card computes TOOLTIP_FIELDS' inside `decorate`; two lists, two calls,
+    # so adding a field to one cannot KeyError out of the other's formatting.
+    result_fractions = fraction_flags(rows, RESULTS_PANEL_FIELDS)
     index = join_index(rows)
 
     with st.sidebar:
@@ -789,7 +891,9 @@ def main() -> None:
             "joined precinct fields still render below."
         )
         picked = st.selectbox("Precinct (research extract only)", sorted(index))
-        _detail_block(index.get(picked), picked, dictionary, panel_fields)
+        _detail_panels(
+            index.get(picked), picked, dictionary, panel_fields, result_fractions
+        )
         return
 
     # Fetched only when the overlay is on, and only after the precinct layer is
@@ -826,31 +930,38 @@ def main() -> None:
     # Directly under the map, so the ramp and its range read as one unit.
     st.html(legend_html(field_domain(rows, field)))
 
-    left, right = st.columns([3, 2])
-    with left:
-        # st.caption(
-        #     f"{colored} of {stats['polygons']} polygons are coloured by {labels[field]}; "
-        #     f"the remaining {stats['polygons'] - colored} carry no value for it and "
-        #     "draw nothing."
-        # )
-        missing = stats["unmatched"]
-        # if missing:
-        #     st.caption(
-        #         f"Excluded, no polygon in the layer ({len(missing)}): "
-        #         + ", ".join(missing)
-        #     )
-    with right:
-        # st.caption(
-        #     f"{stats['matched']} of {stats['csv_rows']} precincts in the research "
-        #     "extract matched a polygon."
-        # )
-        clicked = selected_props(chart) if chart is not None else None
-        if clicked is None:
-            st.subheader("Precinct detail")
-            st.info("Click a precinct on the map to see its demographics.")
-        else:
-            precinct = str(clicked.get(JOIN_LAYER_KEY, "")).strip()
-            _detail_block(index.get(precinct), precinct, dictionary, panel_fields)
+    # The [3, 2] split that used to hold the single detail panel is gone: the row of
+    # two panels needs the full width, and `st.columns` nested inside another
+    # `st.columns` is the shape Streamlit's own docs warn against.  The coverage
+    # captions that lived in those two containers stay parked here, commented, with
+    # their values still computed above -- the panels, not the layout, are the change.
+    missing = stats["unmatched"]
+    # st.caption(
+    #     f"{colored} of {stats['polygons']} polygons are coloured by {labels[field]}; "
+    #     f"the remaining {stats['polygons'] - colored} carry no value for it and "
+    #     "draw nothing."
+    # )
+    # if missing:
+    #     st.caption(
+    #         f"Excluded, no polygon in the layer ({len(missing)}): "
+    #         + ", ".join(missing)
+    #     )
+    # st.caption(
+    #     f"{stats['matched']} of {stats['csv_rows']} precincts in the research "
+    #     "extract matched a polygon."
+    # )
+
+    clicked = selected_props(chart) if chart is not None else None
+    precinct = (
+        str(clicked.get(JOIN_LAYER_KEY, "")).strip() if clicked is not None else None
+    )
+    _detail_panels(
+        None if precinct is None else index.get(precinct),
+        precinct,
+        dictionary,
+        panel_fields,
+        result_fractions,
+    )
 
 
 # Cache geometry so switching the colour field does not refetch 4.6 MB.
