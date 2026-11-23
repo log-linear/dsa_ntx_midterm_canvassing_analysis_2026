@@ -183,11 +183,37 @@ COUNCIL_LAYER_URL = (
     "?where=1=1&outFields=*&returnGeometry=true&f=geojson"
 )
 COUNCIL_LAYER_ID = "council_districts"
-# Outlines only (Decision 2a): `filled=False`, so this RGBA list is a LINE colour
-# and never a fill.  It is deliberately not the precinct ramp -- a district border
-# has to stay readable over any choropleth colour underneath it.
-COUNCIL_LINE_COLOR = [31, 68, 132, 100]
+# ---------------------------------------------------------------------------
+# The council overlay's two colour knobs.  Both are RGBA (0-255 each, alpha
+# last), both are constant colours for the WHOLE layer, and neither is the
+# precinct ramp: a district boundary has to stay readable over any choropleth
+# colour underneath it, so it borrows nothing from COLOR_LOW/COLOR_HIGH.
+#
+# COUNCIL_LINE_COLOR: the district border.  A NEUTRAL ink (R == G == B) with no
+# blue cast, so it reads as a plain outline over the basemap and over any ramp
+# colour it crosses.  Darker RGB than the wash below keeps the boundary legible
+# inside its own district.  Drop the alpha toward 0 for a whisper of a border,
+# toward 255 for hard ink; lower all three channels toward 0 for true black.
+#
+# COUNCIL_FILL_COLOR: the wash inside each district.  A light gray at low alpha,
+# so the overlay tints the district it encloses without hiding the precinct
+# choropleth inside it.  Set the alpha to 0 to return to outlines-only (the
+# original Decision 2a) -- the layer keeps `filled=True`, and a zero-alpha fill
+# paints nothing.
+#
+# Both lists must stay length 4.  deck.gl sizes a colour attribute from the
+# first record it sees and applies that size to every record, so a ragged mix of
+# RGB and RGBA misreads the whole layer -- the same reason FILL_ALPHA lives
+# outside COLOR_LOW/COLOR_HIGH above.
+# ---------------------------------------------------------------------------
+COUNCIL_LINE_COLOR = [150, 150, 150, 140]  # neutral ink border, no blue cast
+COUNCIL_FILL_COLOR = [200, 200, 200, 75]  # transparent light gray district wash
 COUNCIL_LINE_WIDTH_MIN_PIXELS = 2  # device px, so a boundary survives zoom-out
+
+assert len(COUNCIL_LINE_COLOR) == len(COUNCIL_FILL_COLOR) == 4, (
+    "overlay colours must be full RGBA: deck.gl derives the attribute width "
+    "from the first record and applies it to all of them"
+)
 DISTRICT_ON = "Yes"
 DISTRICT_OFF = "No"
 
@@ -452,11 +478,12 @@ def decorate(
 def council_district_records(features: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """One pydeck record per council polygon PART, all rings kept.
 
-    Mirrors `decorate`'s `__rings` convention so the outline layer reads the same
-    key.  A MultiPolygon becomes one record per part (a record can only carry one
-    ring list), and a Polygon with holes carries every ring, so inner rings draw.
-    Geometry types deck cannot stroke as a polygon contribute nothing rather than
-    a half-built record.
+    Mirrors `decorate`'s `__rings` convention so the district layer reads the
+    same key.  A MultiPolygon becomes one record per part (a record can only
+    carry one ring list), and a Polygon with holes carries every ring, so inner
+    rings draw -- and the holes stay unpainted under the layer's fill.
+    Geometry types deck cannot render as a polygon contribute nothing rather
+    than a half-built record.
 
     The records carry the layer attributes (`DISTRICT` etc.) for the payload only:
     this layer is NOT pickable, so nothing of it can reach a tooltip or a click.
@@ -641,18 +668,28 @@ def build_deck(
     )
     layers = [layer]
     if district_records:
-        # Drawn after the precinct layer, so the outlines sit on top.  `filled`
-        # is off and `pickable` is off on purpose (Decision 2a): no fill lets the
-        # choropleth through, and a non-pickable layer cannot steal a precinct
-        # click or shadow the precinct tooltip.  `line_width_min_pixels` is in
-        # device pixels, so the border does not vanish when zoomed to the county.
+        # Drawn after the precinct layer, so the district wash and border sit on
+        # top of the choropleth.  Both colours are layer-wide constants rather
+        # than per-record accessors, but they still go through `get_*` so pydeck
+        # ships them as a plain RGBA list -- not the `@@=` string trap of fc08df5.
+        #
+        # `pickable=False` stays (Decision 2a, unchanged): a non-pickable layer
+        # cannot steal a precinct click or shadow the precinct tooltip.  Enabling
+        # `filled` does NOT hand this layer picking -- the fill sublayer is what
+        # writes the picking colour, but `pickable` gates the whole layer.
+        #
+        # The fill is a transparent light gray, so the choropleth underneath
+        # still reads through it; set COUNCIL_FILL_COLOR's alpha to 0 to go back
+        # to outlines only.  `line_width_min_pixels` is in device pixels, so the
+        # border does not vanish when zoomed to the county.
         layers.append(
             pdk.Layer(
                 "PolygonLayer",
                 data=district_records,
                 id=COUNCIL_LAYER_ID,
                 get_polygon="__rings",
-                filled=False,
+                filled=True,
+                get_fill_color=list(COUNCIL_FILL_COLOR),
                 stroked=True,
                 get_line_color=list(COUNCIL_LINE_COLOR),
                 line_width_min_pixels=COUNCIL_LINE_WIDTH_MIN_PIXELS,

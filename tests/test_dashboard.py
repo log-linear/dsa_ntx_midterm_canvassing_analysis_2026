@@ -718,18 +718,43 @@ assert {k: v for k, v in precinct_layer.items() if k != "data"} == {
 ]
 assert district_layer["@@type"] == "PolygonLayer", district_layer
 assert len(district_layer["data"]) == 14, len(district_layer["data"])
-# Decision 2a: outlines only.  Both must be plain booleans -- a string would be
-# `@@=`-marked and read by the browser as a record lookup.
-assert district_layer["filled"] is False, district_layer.get("filled")
+# Amended 2026-11-23: outlines AND a transparent light gray wash.  (Decision 2a
+# shipped `filled=False`; the fill is back, at low alpha, so the choropleth
+# under it still reads.)  Both switches must be plain booleans -- a string would
+# be `@@=`-marked and read by the browser as a record lookup.
+assert district_layer["filled"] is True, district_layer.get("filled")
 assert district_layer["stroked"] is True, district_layer.get("stroked")
-assert district_layer["getLineColor"] == list(dashboard.COUNCIL_LINE_COLOR), (
-    district_layer.get("getLineColor")
+# Both colours are layer-wide constants shipped as RGBA lists, never strings: a
+# string prop is parsed as a @deck.gl/json expression and the browser reads it
+# as a record key (fc08df5), and deck.gl sizes a colour attribute from the first
+# record it sees, so an RGB list here would misread every district in the layer.
+for _prop, _const in (
+    ("getLineColor", dashboard.COUNCIL_LINE_COLOR),
+    ("getFillColor", dashboard.COUNCIL_FILL_COLOR),
+):
+    assert district_layer[_prop] == list(_const), district_layer.get(_prop)
+    assert not isinstance(district_layer[_prop], str), (
+        f"{_prop}: a colour string is parsed as a JSON expression, not an RGBA list"
+    )
+    assert len(district_layer[_prop]) == 4, district_layer[_prop]
+    assert district_layer[_prop][3] > 0, f"{_prop} at alpha 0 draws nothing"
+# Both are NEUTRAL inks (R == G == B, no blue cast) and neither is the precinct
+# ramp; the border sits darker than its own wash so a boundary stays legible
+# inside the district it outlines.  The request said "transparent black", but
+# the border was tuned by eye to a lighter neutral ink once the map was open, so
+# this asserts the invariant that survives tuning, not one exact triple.
+assert len(set(district_layer["getLineColor"][:3])) == 1, district_layer["getLineColor"]
+assert max(district_layer["getLineColor"][:3]) < max(district_layer["getFillColor"][:3]), (
+    "a border no darker than its own wash reads as a smear"
 )
-assert not isinstance(district_layer["getLineColor"], str), (
-    "a colour string is parsed as a JSON expression, not an RGBA list"
+assert len(set(district_layer["getFillColor"][:3])) == 1, district_layer["getFillColor"]
+assert min(district_layer["getFillColor"][:3]) >= 150, (
+    f"the fill is not a LIGHT gray: {district_layer['getFillColor']}"
 )
-assert len(district_layer["getLineColor"]) == 4, district_layer["getLineColor"]
-assert district_layer["getLineColor"][3] > 0, "an invisible border draws nothing"
+assert district_layer["getFillColor"][3] < 255, (
+    "an opaque wash hides the precinct choropleth inside every district"
+)
+assert district_layer["getLineColor"] != district_layer["getFillColor"]
 # Zoom-surviving width, in device pixels.
 assert district_layer["lineWidthMinPixels"] == dashboard.COUNCIL_LINE_WIDTH_MIN_PIXELS, (
     district_layer.get("lineWidthMinPixels")
@@ -738,11 +763,10 @@ assert district_layer["lineWidthMinPixels"] >= 2, district_layer
 # It must not steal precinct picks or hover.
 assert district_layer["pickable"] is False, district_layer.get("pickable")
 assert district_layer.get("autoHighlight") in (None, False), district_layer
-assert "getFillColor" not in district_layer, "an unfilled layer still asks for a fill"
 assert district_layer["getPolygon"] == "@@=__rings", district_layer["getPolygon"]
 assert precinct_layer["pickable"] is True, "the precinct layer lost its pickability"
 assert "tooltip" not in district_layer, "a layer-level tooltip serialises and is never read"
-ok("overlay deck: precinct layer then 14 unfilled stroked districts, non-pickable")
+ok("overlay deck: precinct layer then 14 filled+stroked districts, non-pickable")
 
 # The grammar sweep now has to cover EVERY emitted layer: a second layer is a
 # second batch of string props the browser will parse, and the old sweep over
@@ -754,8 +778,9 @@ for la in blob2["layers"]:
         assert not (isinstance(value, str) and "=>" in value), f"{la['id']}.{prop}"
 assert "=>" not in json.dumps(blob2)
 # The "no line props" claim is about the PRECINCT layer only: borders were
-# removed from the choropleth, while the district overlay is a border by design,
-# so scoping this to layer 0 is the assertion, not an oversight.
+# removed from the choropleth, while the district overlay is a border (and since
+# 2026-11-23 a light gray wash) by design, so scoping this to layer 0 is the
+# assertion, not an oversight.
 assert [k for k in precinct_layer if "line" in k.lower()] == []
 assert "lineWidthMinPixels" in district_layer and "getLineColor" in district_layer
 ok("every string prop on both layers is legal @deck.gl/json grammar")
@@ -1855,8 +1880,17 @@ try:
     # stealing a precinct pick or a hover have to hold on the deck actually
     # handed to st.pydeck_chart, not only on one built directly in-process.
     assert on_layers[1]["pickable"] is False, on_layers[1].get("pickable")
-    assert on_layers[1]["filled"] is False, on_layers[1].get("filled")
+    # Filled AND stroked, both transparent, both shipped as RGBA lists -- the
+    # same shape asserted on the in-process deck above, now on the deck actually
+    # handed to st.pydeck_chart.
+    assert on_layers[1]["filled"] is True, on_layers[1].get("filled")
     assert on_layers[1]["stroked"] is True, on_layers[1].get("stroked")
+    assert on_layers[1]["getFillColor"] == list(dashboard.COUNCIL_FILL_COLOR), (
+        on_layers[1].get("getFillColor")
+    )
+    assert on_layers[1]["getLineColor"] == list(dashboard.COUNCIL_LINE_COLOR), (
+        on_layers[1].get("getLineColor")
+    )
     assert "tooltip" not in on_layers[1], "a layer tooltip serialises and is never read"
     assert on_layers[0]["pickable"] is True, "the precinct layer lost its pickability"
     assert len(council_calls) == 1, council_calls
