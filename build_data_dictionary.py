@@ -49,9 +49,12 @@ MANUAL = {
     # --- union of the .ods sheets (data/raw/District {1,2,9} precincts.ods) ---
     "dallas_county_precinct_number": (
         "text",
-        "Dallas County precinct number, from the unnamed first column of every "
-        "sheet in the three district canvassing workbooks. Join key to the VTD "
-        "mapping and, with the county, to the precinct results roll-up.",
+        "Dallas County precinct number: this extract's row key, one row per code. "
+        "A row arrives by one of two routes -- either the unnamed first column of "
+        "a sheet in the three district canvassing workbooks, or, for precincts no "
+        "workbook named, a `dallas_county_precinct_id` in the VTD crosswalk. Join "
+        "key to the VTD mapping and, with the county, to the precinct results "
+        "roll-up; compared as TEXT, so codes like 0024 and 30C4 survive.",
         "Dallas County Precinct Number",
     ),
     "precinct_group": (
@@ -131,17 +134,32 @@ MANUAL = {
         "Filename of the .ods workbook the row came from, for provenance.",
         "Source Workbook",
     ),
+    # --- inherited from the DFS export, re-authored: the source's own
+    # description of this column misstates its grain (see JOIN_NOTE below). ---
+    "name": (
+        "text",
+        "Census voting-district identifier of the VTD this row's demographic "
+        "figures describe -- the export's own seat name, which is a VTD code "
+        "(`source_ref` == '48113' + `name`), NOT a Dallas County precinct number. "
+        "The two namespaces are both four digits and coincide for some precincts "
+        "while describing different ground, so this column is never a join key "
+        "here: precincts are attributed through the VTD crosswalk only.",
+        "Name",
+    ),
     # --- data/raw/dallas_vtd_to_county_precinct.csv ---
     "census_vtd_id": (
         "text",
         "Census voting-district identifier from the county precinct-to-VTD crosswalk. "
-        "One precinct maps to several VTDs, so a precinct appears on one row per VTD.",
+        "A precinct does map to several VTDs in that file, but the fan-out is "
+        "collapsed before writing: this extract holds one row per precinct, so this "
+        "column names the single VTD whose DFS figures were kept, not every VTD the "
+        "precinct touches.",
         "Census VTD ID",
     ),
     "census_vtd_geoid": (
         "text",
-        "Full Census GEOID of the voting district; join key to the demographic "
-        "export's `source_ref`.",
+        "Full Census GEOID of the voting district named by census_vtd_id; join key "
+        "to the demographic export's `source_ref`.",
         "Census VTD GEOID",
     ),
     "share_of_vtd": (
@@ -516,7 +534,15 @@ MANUAL = {
 
 # DFS fields joined on a key worth naming in the dictionary.
 JOIN_NOTE = {
-    "source_ref": " Joined to `census_vtd_geoid` from the precinct-to-VTD crosswalk.",
+    # The attribution rule, stated as the build actually applies it: fullness
+    # first, share only as a tie-break, so two rows of 820 land on a minority
+    # VTD (1315 at 0.115, 1724 at 0.144) because the fuller DFS row won.
+    "source_ref": " Reached by this row's `census_vtd_geoid` from the precinct-to-VTD "
+                  "crosswalk: the export is keyed by VTD, and the VTD kept for a "
+                  "precinct is the one `dedupe_output_by_precinct()` scored fullest, "
+                  "tie-broken by the largest `share_of_county_precinct`. So these "
+                  "figures describe that VTD -- usually the one covering most of the "
+                  "precinct, but not guaranteed to be it.",
 }
 
 # ---------------------------------------------------------------------------

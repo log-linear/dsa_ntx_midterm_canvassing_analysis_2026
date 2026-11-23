@@ -6,6 +6,7 @@ repo root.
 
 from __future__ import annotations
 
+import csv
 import json
 import re
 import sys
@@ -64,6 +65,87 @@ dictionary = dashboard.build_dictionary()
 index = dashboard.join_index(rows)
 labels = {f: dashboard.label_for(dictionary, f) for f in dashboard.DETAIL_FIELDS}
 
+# --- the two universes this change is about, read from data/raw/ ------------
+# Every count the plan's matrix moves is derived from these rather than typed
+# in.  The extract's row universe is the set of precinct codes the VTD crosswalk
+# can attribute; the population it ALREADY covered is the set of codes the
+# canvass workbooks name.  Both come straight from the inputs, never from the
+# extract -- an extract that dropped or invented a row must fail a check against
+# the sources, not agree with itself.
+import build_precinct_data as bpd  # noqa: E402
+
+CROSSWALK_CSV = BASE / "data/raw/dallas_vtd_to_county_precinct.csv"
+CROSSWALK_ID_COL = "dallas_county_precinct_id"
+with open(CROSSWALK_CSV, newline="", encoding="utf-8") as _fh:
+    _cw_reader = csv.DictReader(_fh)
+    CROSSWALK_COLS = list(_cw_reader.fieldnames or [])
+    crosswalk_rows = list(_cw_reader)
+# Header guard: these literals are the attribution path the plan freezes.  A
+# renamed key must fail here rather than silently shrink the expected universe
+# to the rows that still match.
+for _c in (CROSSWALK_ID_COL, "census_vtd_geoid", "share_of_county_precinct"):
+    assert _c in CROSSWALK_COLS, f"{CROSSWALK_CSV.name} header is {CROSSWALK_COLS}"
+CROSSWALK_CODES = {r[CROSSWALK_ID_COL].strip() for r in crosswalk_rows} - {""}
+ODS_ROWS, ODS_COLS = bpd.read_ods_tables()
+CANVASSED_CODES = {r[bpd.PRECINCT_COL].strip() for r in ODS_ROWS} - {""}
+ADDED_CODES = sorted(CROSSWALK_CODES - CANVASSED_CODES)
+EXTRACT_CODES = {r[dashboard.JOIN_CSV_KEY].strip() for r in rows}
+assert CANVASSED_CODES <= CROSSWALK_CODES, sorted(CANVASSED_CODES - CROSSWALK_CODES)
+assert CANVASSED_CODES <= EXTRACT_CODES, sorted(CANVASSED_CODES - EXTRACT_CODES)
+ok("universes read from data/raw/, not from the extract",
+   f"{len(CROSSWALK_CODES)} crosswalk codes, {len(CANVASSED_CODES)} canvassed, "
+   f"{len(ADDED_CODES)} added")
+
+# --- the three 2026 general files, read once and keyed by precinct code -----
+# Read up here because BOTH halves of the suite need them: the UI checks derive a
+# field's expected populated count from the raw source rather than from the
+# extract, and the build checks below compare the joined cells cell-by-cell.
+GOV_RAW = list(csv.DictReader(open(BASE / "data/raw/2026_governor_general_precinct.csv", newline="", encoding="utf-8")))
+SEN_RAW = list(csv.DictReader(open(BASE / "data/raw/2026_senate_general_precinct.csv", newline="", encoding="utf-8")))
+PROPS_RAW = list(csv.DictReader(open(BASE / "data/raw/2026_props_general_precinct.csv", newline="", encoding="utf-8")))
+GOV_IDX = {bpd.general_code(r[bpd.GENERAL_KEY_COL], bpd.GOV_CSV): r for r in GOV_RAW}
+SEN_IDX = {bpd.general_code(r[bpd.GENERAL_KEY_COL], bpd.SEN_CSV): r for r in SEN_RAW}
+PROPS_IDX: "dict[str, dict[str, dict[str, str]]]" = {}
+for _r in PROPS_RAW:
+    PROPS_IDX.setdefault(bpd.general_code(_r[bpd.GENERAL_KEY_COL], bpd.PROPS_CSV), {})[
+        _r[bpd.GENERAL_PROPS_COL].strip()] = _r
+GENERAL_COLS = bpd.general_columns()
+assert len(GENERAL_COLS) == 25, GENERAL_COLS
+
+
+def general_source(contest, code):
+    """The raw source row one 2026 contest holds for one precinct code."""
+    if contest == "gov":
+        return GOV_IDX.get(code)
+    if contest == "sen":
+        return SEN_IDX.get(code)
+    return PROPS_IDX.get(code, {}).get(contest)
+
+
+# ONE field -> source map for the 24 contest measures, derived from the builder's
+# own GENERAL_CONTESTS rather than a second hand-written table plus a prefix-
+# routing helper.  A fifth colourable 2026 field is therefore covered by every
+# check at once: a hand-written map would KeyError in one loop while another
+# routed it silently to the governor file.
+FIELD_SOURCE = {
+    target: (contest, source)
+    for contest, measures in bpd.GENERAL_CONTESTS
+    for source, target in measures.items()
+}
+assert len(FIELD_SOURCE) == 24, len(FIELD_SOURCE)
+assert set(FIELD_SOURCE) <= set(GENERAL_COLS), sorted(set(FIELD_SOURCE) - GENERAL_COLS)
+
+
+def raw_populated_codes(field, codes):
+    """Codes among `codes` whose RAW 2026 source row carries a figure here.
+
+    Read from data/raw/, so this is the expectation the extract is judged
+    against -- not a restatement of what the extract happens to hold.
+    """
+    contest, source_col = FIELD_SOURCE[field]
+    return [c for c in codes
+            if dashboard.to_float((general_source(contest, c) or {}).get(source_col)) is not None]
+
 # --- dictionary coverage: every field the dashboard touches is documented ----
 all_needed = (
     dashboard.CHOROPLETH_FIELDS + dashboard.TOOLTIP_FIELDS
@@ -73,9 +155,14 @@ missing = [f for f in all_needed if f not in dictionary]
 assert not missing, f"undocumented fields: {missing}"
 ok("dictionary covers every dashboard field", f"{len(dictionary)} entries")
 
-assert len(rows) == 85, len(rows)
-assert len(index) == 85, len(index)
-ok("CSV is 85 rows / 85 unique precinct keys")
+assert len(rows) == len(CROSSWALK_CODES), (len(rows), len(CROSSWALK_CODES))
+assert len(index) == len(rows), (len(index), len(rows))
+assert EXTRACT_CODES == CROSSWALK_CODES, (
+    f"the extract's universe is not the crosswalk's: "
+    f"{sorted(EXTRACT_CODES ^ CROSSWALK_CODES)[:10]}"
+)
+ok(f"CSV is {len(rows)} rows / {len(index)} unique precinct keys, exactly the "
+   "crosswalk's universe")
 
 # --- Decision 2b: regenerated labels carry no source artifacts ---------------
 ARTIFACTS = ["Pct ", " nh ", " us ", "pct ", "sq mi", " snap", "50k "]
@@ -197,11 +284,40 @@ assert dashboard.NO_DATA_COLOR == [0, 0, 0, 0], dashboard.NO_DATA_COLOR
 ok("no-data precincts stay fully empty regardless of FILL_ALPHA: no fill, no border")
 assert dashboard.color_scale(None, domain) == [0, 0, 0, 0], "no-data must not inherit FILL_ALPHA"
 
-# per-field normalization, never a fixed 0-1
+# per-field normalization, never a fixed 0-1.  `2024_kamala` spanned 0.51-0.85
+# over the 85 canvassed rows; widening the universe put 481 precincts on the
+# field, and among them precincts 1301 and 1742 really recorded 0 and 1 votes --
+# recorded, not blanked into zeros.  So the domain moved and no typed-in range
+# survives it: the expectation is recomputed from the extract's own populated
+# values here, which is a different code path from `domain_for`'s.
+def _populated_range(field, source=rows):
+    vals = [dashboard.to_float(r.get(field)) for r in source]
+    pop = [v for v in vals if v is not None]
+    return None if not pop else (min(pop), max(pop))
+
+
 kamala = dashboard.domain_for([dashboard.to_float(r.get("2024_kamala")) for r in rows])
-assert kamala and 0.5 < kamala[0] and kamala[1] < 0.9, kamala
+assert kamala == _populated_range("2024_kamala"), (kamala, _populated_range("2024_kamala"))
+# The 0 and the 1 are real recorded figures carried by crosswalk-only precincts,
+# and are NOT present among the canvassed 85: the widening moved the range
+# honestly rather than inventing an endpoint.
+_lo = sorted(p for p in index if dashboard.to_float(index[p].get("2024_kamala")) == 0.0)
+_hi = sorted(p for p in index if dashboard.to_float(index[p].get("2024_kamala")) == 1.0)
+assert _lo and _hi, (kamala, _lo[:3], _hi[:3])
+assert not set(_lo) & CANVASSED_CODES and not set(_hi) & CANVASSED_CODES, (
+    f"a canvassed precinct recorded an endpoint: {sorted(set(_lo) | set(_hi))}")
+assert set(_lo) <= set(ADDED_CODES) and set(_hi) <= set(ADDED_CODES)
+# "never a fixed 0-1" still has to be true of a field, so it is asserted on one
+# whose populated range is strictly inside: the default metric tops out at the
+# no-rate of responders, and it is recomputed the same way.
+_default_dom = dashboard.domain_for(
+    [dashboard.to_float(r.get(dashboard.DEFAULT_CHOROPLETH)) for r in rows])
+assert _default_dom == _populated_range(dashboard.DEFAULT_CHOROPLETH), _default_dom
+assert 0.0 <= _default_dom[0] < _default_dom[1] < 1.0, _default_dom
+assert _default_dom != kamala, (_default_dom, kamala)
 assert dashboard.color_scale(kamala[0], kamala) == dashboard.color_scale(0.0, domain)
-ok("each field scales on its own populated min/max", f"2024_kamala {kamala}")
+ok("each field scales on its own populated min/max", f"2024_kamala {kamala}, "
+   f"default {_default_dom}, {len(_lo)} real zeros / {len(_hi)} real ones")
 
 # --- Decision 1c: the detail panel ----------------------------------------
 panel = dashboard.detail_panel_fields(rows)
@@ -304,8 +420,39 @@ features = payload["features"]
 stats = dashboard.join_precincts(features, rows)
 assert len(features) == 791, len(features)
 assert stats["polygons"] == 791
-assert stats["matched"] == 84, stats
-assert stats["csv_rows"] == 85
+assert stats["csv_rows"] == len(rows), stats["csv_rows"]
+# AC2: matched polygons. Recomputed from the live features against the CROSSWALK
+# (the raw input), never from `stats` or from the extract -- `join_precincts()`
+# derives `matched` from the index, so comparing it to anything the index defines
+# would be an identity that cannot fail. Here the expected count comes from a
+# different pair of sources: the layer's own NewPrcnt text and
+# data/raw/dallas_vtd_to_county_precinct.csv.
+EXPECT_MATCHED = sum(
+    1 for f in features
+    if str(f["properties"].get(dashboard.JOIN_LAYER_KEY, "")).strip() in CROSSWALK_CODES
+)
+assert stats["matched"] == EXPECT_MATCHED, (stats["matched"], EXPECT_MATCHED)
+assert EXPECT_MATCHED == 704, EXPECT_MATCHED
+# ...and the polygons left without a row are exactly the ones the crosswalk
+# cannot attribute -- nothing else, so no polygon loses a row for another reason.
+NO_CROSSWALK = sorted(
+    str(f["properties"].get(dashboard.JOIN_LAYER_KEY, "")).strip() for f in features
+    if str(f["properties"].get(dashboard.JOIN_LAYER_KEY, "")).strip() not in CROSSWALK_CODES
+)
+assert len(NO_CROSSWALK) == 87, len(NO_CROSSWALK)
+assert sorted(NO_CROSSWALK) == sorted(set(NO_CROSSWALK)), "NewPrcnt repeats"
+# The polygons the join leaves without a row are EXACTLY the polygons the
+# crosswalk cannot attribute: a polygon in the layer, whose code the crosswalk
+# does name, must have a row. Compared as sets because `stats` reports matched
+# keys, not unmatched polygons; this is the matrix's "87 polygons with no
+# crosswalk entry stay uncovered" row, read off the live layer.
+LAYER_KEYS = dashboard.layer_keys(features)
+polygons_without_row = sorted(LAYER_KEYS - set(index))
+assert polygons_without_row == sorted(set(NO_CROSSWALK)), (
+    f"{len(polygons_without_row)} polygons have no row; expected the "
+    f"{len(NO_CROSSWALK)} the crosswalk cannot attribute"
+)
+assert stats["matched"] == len(features) - len(polygons_without_row)
 assert "1046" in stats["unmatched"], stats["unmatched"]
 # Matrix row "Precinct in CSV, absent from layer": the excluded ids are CSV
 # rows the layer does not carry, so unmatched keys are in the index and NOT
@@ -313,7 +460,12 @@ assert "1046" in stats["unmatched"], stats["unmatched"]
 keys = dashboard.layer_keys(features)
 assert "1046" in index and "1046" not in keys
 assert all(k in index and k not in keys for k in stats["unmatched"]), stats["unmatched"]
-ok("join cardinality: 84 of 85 CSV precincts match a polygon")
+# Matrix row "Extract precinct the layer omits": 116 codes the crosswalk names
+# but the live layer does not draw, reachable only through the offline selectbox.
+assert len(stats["unmatched"]) == len(CROSSWALK_CODES) - EXPECT_MATCHED, (
+    len(stats["unmatched"]), EXPECT_MATCHED)
+ok(f"join cardinality: {stats['matched']} of {stats['csv_rows']} CSV precincts "
+   f"match a polygon; {len(stats['unmatched'])} rows have no polygon")
 ok("precinct 1046 is absent from the layer (excluded, reported)")
 
 assert len(keys) == 791 and "" not in keys
@@ -446,13 +598,23 @@ ok("the four 2026 fields are colourable and hover-last; default unmoved",
 # that here would only add literals that can drift, so this loop covers what
 # that one cannot: these four are result *shares*, and the count of filled
 # polygons is read from `populated`/`stats`, never typed in.
+# The populated count can no longer be `stats["matched"]` for all four: the
+# widening reaches precincts the 2026 files cover unevenly (a precinct can be in
+# the county proposition file and have no city row at all), so the city share is
+# populated on fewer polygons than the join matches.  Each field's expectation is
+# therefore recomputed from the RAW 2026 files, per precinct code -- the extract
+# and `stats` are both under test here, so neither gets to define the number.
+MATCHED_POLYGON_CODES = [
+    str(f["properties"].get(dashboard.JOIN_LAYER_KEY, "")).strip() for f in features
+    if str(f["properties"].get(dashboard.JOIN_LAYER_KEY, "")).strip() in CROSSWALK_CODES
+]
 for field in NEW_FIELDS:
     dom = dashboard.field_domain(rows, field)
     assert dom and dashboard.domain_is_share(dom), (field, dom)
     assert 0.0 <= dom[0] < dom[1] <= 1.0, (field, dom)
-    # every matched precinct carries a value for a 2026 result share, so the
-    # populated count tracks the join rather than the canvass metrics' 22-49.
-    assert populated[field] == stats["matched"], (field, populated[field])
+    _expect_pop = len(raw_populated_codes(field, MATCHED_POLYGON_CODES))
+    assert populated[field] == _expect_pop, (field, populated[field], _expect_pop)
+    assert _expect_pop <= stats["matched"], (field, _expect_pop)
     live = dashboard.decorate(features, rows, field)
     # a field whose domain is a share must vary: a flat ramp would claim a
     # spread the colour scale does not have.
@@ -694,15 +856,24 @@ RETIRED = ["prop_a_city_against_election_day", "prop_a_city_against_ev_in_person
 assert not [c for c in RETIRED if c in header], f"detail.xlsx fields survived: {RETIRED}"
 assert not [c for c in bpd.COMB_OVERLAYS if c in header], \
     "an overlaid measure was also carried under its own name"
-# AC1 / AC7 shape, asserted rather than printed: 85 rows x 120 columns, and one
+# AC1 / AC7 shape, asserted rather than printed: 820 rows x 120 columns, and one
 # dictionary row per extract column with nothing falling through to the
 # UNDOCUMENTED branch.  Without this a further measure in precinct_comb.csv is
 # silently promoted into join_cols by comb_columns(), which returns every
 # non-key header column, and the count moves with no check to fail.  120 = 99 at
 # the last baseline, less the four superseded 2026 canvass placeholders, plus the
-# 25 measures the three 2026 general-election files join in.
+# 25 measures the three 2026 general-election files join in.  The widening adds
+# ROWS, never columns, so 120 is also the guard that it did not smuggle a field
+# in: the header is compared to the committed extract's below.
 assert len(header) == 120, header
-assert len(rebuilt) == 85, len(rebuilt)
+assert len(rebuilt) == len(CROSSWALK_CODES), (len(rebuilt), len(CROSSWALK_CODES))
+# Matrix row "In crosswalk, absent from the .ods union": the added population is
+# exactly the crosswalk codes the canvass workbooks never named.
+assert sorted(rebuilt) != sorted(CANVASSED_CODES)
+assert ADDED_CODES and len(ADDED_CODES) == len(rebuilt) - len(CANVASSED_CODES), (
+    len(ADDED_CODES), len(rebuilt), len(CANVASSED_CODES))
+assert set(rebuilt) == CROSSWALK_CODES, sorted(set(rebuilt) ^ CROSSWALK_CODES)[:10]
+assert set(CANVASSED_CODES) <= set(rebuilt), sorted(CANVASSED_CODES - set(rebuilt))[:10]
 assert len(fresh_dict) == len(header) == 120, (len(fresh_dict), len(header))
 assert set(fresh_dict) == set(header), \
     "dictionary and extract disagree on the field set"
@@ -741,7 +912,13 @@ baseline_header = list(next(iter(baseline_rows.values())).keys())
 survived = [c for c in baseline_header if c in header]
 assert len(baseline_header) == 99 and len(survived) == 95, \
     f"expected 99 baseline columns with 95 surviving, got {len(baseline_header)}/{len(survived)}"
-assert set(baseline_rows) == set(rebuilt), "the build gained or lost precinct rows"
+# The widening GAINS rows by design, so equality of the code sets is no longer
+# the contract.  What it is: every baseline precinct keeps its row, no code
+# arrives that the crosswalk cannot attribute, and the added population is
+# exactly the crosswalk's codes minus the baseline's.
+assert set(baseline_rows) <= set(rebuilt), sorted(set(baseline_rows) - set(rebuilt))[:10]
+assert set(rebuilt) - set(baseline_rows) == set(ADDED_CODES), (
+    f"{len(set(rebuilt) - set(baseline_rows))} new rows, expected {len(ADDED_CODES)}")
 regressions = [
     (p, c, baseline_rows[p][c], rebuilt[p][c])
     for p in baseline_rows for c in survived
@@ -750,17 +927,69 @@ regressions = [
 assert not regressions, \
     f"columns this change does not own altered against {BASELINE_REVISION}: {regressions[:5]}"
 ok(f"AC2: the {len(survived)} surviving columns are identical to {BASELINE_REVISION}",
-   f"{len(baseline_rows)} rows x {len(survived)} columns")
+   f"{len(baseline_rows)} rows unchanged, {len(ADDED_CODES)} rows added")
+
+# Zero drift against THIS plan's own baseline.  The revision above predates the
+# 2026 joins, so it only proves the 95 columns that survived them.  The plan's
+# `baseline_revision` is the extract the widening was written against -- already
+# 120 columns -- so this is the check that says the widening changed rows and
+# nothing else: the header is byte-identical in name AND order, no column was
+# added or renamed, and all 85 original rows are identical across all 120
+# columns.  A column appended to `out_cols` would slip past the 374c0fd sweep
+# above (it compares only columns that existed there) and must not slip here.
+PLAN_BASELINE_REVISION = "7b38e3a"
+try:
+    _plan_base_bytes = subprocess.run(
+        ["git", "show", f"{PLAN_BASELINE_REVISION}:data/precinct_data.csv"],
+        cwd=BASE, capture_output=True, check=True).stdout
+except subprocess.CalledProcessError as _exc:
+    raise AssertionError(
+        f"this check needs {PLAN_BASELINE_REVISION} reachable in git "
+        f"({_exc.stderr.decode(errors='replace')[:120]})") from None
+with io.StringIO(_plan_base_bytes.decode("utf-8-sig"), newline="") as _fh:
+    _plan_base = {r[bpd.PRECINCT_COL]: r for r in csv.DictReader(_fh)}
+_plan_base_header = list(next(iter(_plan_base.values())).keys())
+assert _plan_base_header == header, (
+    f"the widening changed the header, not just the rows: "
+    f"added {sorted(set(header) - set(_plan_base_header))} "
+    f"removed {sorted(set(_plan_base_header) - set(header))} "
+    f"or reordered it ({len(_plan_base_header)} vs {len(header)} cols)")
+assert len(header) == 120 and len(_plan_base_header) == 120, len(header)
+assert set(_plan_base) <= set(rebuilt), sorted(set(_plan_base) - set(rebuilt))[:10]
+_drift = [(p, c, _plan_base[p][c], rebuilt[p][c])
+          for p in _plan_base for c in header if _plan_base[p][c] != rebuilt[p][c]]
+assert not _drift, (
+    f"{len(_drift)} cells of the {len(_plan_base)} baseline rows differ against "
+    f"{PLAN_BASELINE_REVISION} on all 120 columns: {_drift[:5]}")
+assert sorted(rebuilt) != sorted(_plan_base) and set(ADDED_CODES) == set(rebuilt) - set(_plan_base)
+ok(f"plan baseline {PLAN_BASELINE_REVISION}: identical 120-column header and "
+   f"{len(_plan_base)} rows unchanged on every column",
+   f"{len(rebuilt)} rows now ({len(ADDED_CODES)} added)")
 
 # Matrix "Normal precinct": every matched precinct carries all 20 measures
-# verbatim from its Dallas row -- compared cell by cell to the source, for all
-# 84, not sampled.  `..._percent_Harris` landing in `2024_kamala` is decision 1a.
+# verbatim from its Dallas row -- compared cell by cell to the source, for every
+# matched precinct, not sampled.  `..._percent_Harris` landing in `2024_kamala`
+# is decision 1a.  The widening grows this population: the crosswalk-only rows
+# are matched too, because the result joins run AFTER it (that ordering is what
+# this verbatim sweep proves -- a join placed before the widening would leave
+# 397 added precincts blank and fail here).
 normal = [p for p in rebuilt if p in dallas_rollup]
 drift = [(p, src) for p in normal for src, tgt in zip(MEASURE_COLS, JOINED_COLS)
          if rebuilt[p][tgt] != dallas_rollup[p][src].strip()]
 assert not drift, f"joined values disagree with the roll-up: {drift[:5]}"
-assert len(normal) == 84, len(normal)
-ok("matrix: 84 matched precincts carry all 20 measures verbatim", f"{len(drift)} mismatches")
+# The expected matched population, recomputed from the TWO SOURCES the join
+# reads -- the crosswalk's universe and the roll-up's Dallas rows -- not from
+# `rebuilt`.  It therefore catches a widening that never reached the join (the
+# added rows would carry no results) and a roll-up that lost a precinct.
+EXPECT_ROLLUP = sorted(CROSSWALK_CODES & set(dallas_rollup))
+assert sorted(normal) == EXPECT_ROLLUP, (
+    f"{len(normal)} precincts matched the roll-up, expected {len(EXPECT_ROLLUP)}")
+assert len(normal) == 481, len(normal)
+added_rollup = [p for p in normal if p in ADDED_CODES]
+assert added_rollup and len(added_rollup) == len(
+    set(ADDED_CODES) & set(dallas_rollup)), len(added_rollup)
+ok(f"matrix: {len(normal)} matched precincts carry all 20 measures verbatim",
+   f"{len(drift)} mismatches, {len(added_rollup)} of them added rows")
 
 # Matrix "Precinct absent from source": 1046 has no Dallas row.  The row is
 # still emitted, its 20 result figures are blank, the canvass figures the .ods
@@ -797,41 +1026,41 @@ assert _zero_row["2024_votes_Trump"] == "", _zero_row  # recorded blank stays bl
 assert "2024_percent_Harris" not in _zero_row, "overlay wrote its source name"
 ok("matrix: a genuine 0 is written as 0; a blank source stays blank")
 
-# Matrix "Zero-vs-blank among our 84": the only empty cell in each of the 20
-# joined fields is 1046, and no matched precinct holds a zero -- which is why
-# the generator reports the gap as a row count, per field, from reconcile().
-for _c in JOINED_COLS:
-    _empties = [p for p in rebuilt if rebuilt[p][_c] == ""]
-    assert _empties == ["1046"], f"{_c}: unexpected empty rows {_empties}"
-    assert not [p for p in normal if rebuilt[p][_c].strip() == "0"], f"{_c}: unexpected zero"
-    assert "1 of 85 rows empty" in dictionary[_c]["description"], _c
-ok("matrix: 1046 alone is empty in all 20 fields, reported as 1 of 85 rows", f"{len(JOINED_COLS)} fields")
+# Matrix "Zero-vs-blank" over the WIDENED universe. Before this change the only
+# empty cell in each of the 20 joined fields was 1046, because the extract held
+# only precincts a canvass workbook named and all but one of them had a Dallas
+# row.  Now the empties are a population, so they are re-derived from the
+# roll-up itself rather than remembered: a field is blank exactly where the
+# precinct has no Dallas row OR its Dallas row leaves that measure empty (the
+# propositions are recorded for 79 precincts only).  `..._percent_Harris` ->
+# `2024_kamala` means the source column is looked up through COMB_OVERLAYS.
+_no_rollup = {p for p in rebuilt if p not in dallas_rollup}
+assert "1046" in _no_rollup, "1046 gained a roll-up row: the exemplar moved"
+for _src, _c in zip(MEASURE_COLS, JOINED_COLS):
+    _empties = {p for p in rebuilt if rebuilt[p][_c] == ""}
+    _expect = {p for p in _no_rollup} | {
+        p for p in normal if dallas_rollup[p].get(_src, "").strip() == ""}
+    assert _empties == _expect, (
+        f"{_c}: {len(_empties)} blank rows, expected {len(_expect)} "
+        f"({sorted(_empties ^ _expect)[:5]} differ)")
+    # A recorded 0 is a value: no blank became a zero and no zero a blank.
+    for p in sorted(_expect):
+        assert rebuilt[p][_c] == "", p
+    _zeros = [p for p in normal if rebuilt[p][_c] == "0"]
+    assert len(_zeros) == sum(
+        1 for p in normal if dallas_rollup[p].get(_src, "").strip() == "0"), _c
+    assert f"{len(_empties)} of {len(rebuilt)} rows empty" in dictionary[_c]["description"], (
+        _c, dictionary[_c]["description"][-70:])
+ok(f"matrix: blank roll-up cells are exactly the precincts with no Dallas figure, "
+   f"named per field by reconcile() over {len(rebuilt)} rows", f"{len(JOINED_COLS)} fields")
 
 # --- 2026 general election: the three per-precinct result files ------------
 # Same discipline as the roll-up above: asserted on the rebuild, cell by cell for
 # every matched precinct, against the source files keyed by the text after the
 # colon.  A sampled spot-check is what let the earlier column-shift defects ship.
-GOV_RAW = list(csv.DictReader(open(BASE / "data/raw/2026_governor_general_precinct.csv", newline="", encoding="utf-8")))
-SEN_RAW = list(csv.DictReader(open(BASE / "data/raw/2026_senate_general_precinct.csv", newline="", encoding="utf-8")))
-PROPS_RAW = list(csv.DictReader(open(BASE / "data/raw/2026_props_general_precinct.csv", newline="", encoding="utf-8")))
-GOV_IDX = {bpd.general_code(r[bpd.GENERAL_KEY_COL], bpd.GOV_CSV): r for r in GOV_RAW}
-SEN_IDX = {bpd.general_code(r[bpd.GENERAL_KEY_COL], bpd.SEN_CSV): r for r in SEN_RAW}
-PROPS_IDX: dict[str, dict[str, dict[str, str]]] = {}
-for _r in PROPS_RAW:
-    PROPS_IDX.setdefault(bpd.general_code(_r[bpd.GENERAL_KEY_COL], bpd.PROPS_CSV), {})[
-        _r[bpd.GENERAL_PROPS_COL].strip()] = _r
-GENERAL_COLS = bpd.general_columns()
-assert len(GENERAL_COLS) == 25, GENERAL_COLS
-
-
-def general_source(contest, code):
-    if contest == "gov":
-        return GOV_IDX.get(code)
-    if contest == "sen":
-        return SEN_IDX.get(code)
-    return PROPS_IDX.get(code, {}).get(contest)
-
-
+# GOV_IDX / SEN_IDX / PROPS_IDX / GENERAL_COLS / general_source() / FIELD_SOURCE
+# are read ONCE at the top of this file, so the UI checks and these build checks
+# judge the extract against the same raw sources through one field -> map.
 matched_general = [p for p in rebuilt if general_source("gov", p)]
 drift = [
     (p, contest, src, tgt)
@@ -843,15 +1072,45 @@ drift = [
     if rebuilt[p][tgt] != ((general_source(contest, p) or {}).get(src) or "").strip()
 ]
 assert not drift, f"joined 2026 values disagree with their source row: {drift[:5]}"
-assert len(matched_general) == 84, len(matched_general)
-ok("matrix: 84 matched precincts carry all 24 contest measures verbatim", f"{len(drift)} mismatches")
+# The governor file covers every county precinct the crosswalk names except the
+# 116 with no polygon, so the widened join reaches 704 precincts -- recomputed
+# from the raw file and the crosswalk, not from `rebuilt`.
+EXPECT_GENERAL = sorted(CROSSWALK_CODES & set(GOV_IDX))
+assert sorted(matched_general) == EXPECT_GENERAL, (
+    len(matched_general), len(EXPECT_GENERAL))
+assert len(matched_general) > len(CANVASSED_CODES), (
+    "the widening did not reach the 2026 result joins")
+ok(f"matrix: {len(matched_general)} matched precincts carry all 24 contest "
+   "measures verbatim", f"{len(drift)} mismatches, "
+   f"{len(set(matched_general) & set(ADDED_CODES))} of them added rows")
 
 # `Registered` is carried once (decision 2b) but asserted to agree across the
 # four files first; check the surviving value is the governor row's.
 reg_drift = [p for p in matched_general
              if rebuilt[p][bpd.GENERAL_REGISTERED_OUT] != GOV_IDX[p][bpd.GENERAL_REGISTERED_COL].strip()]
 assert not reg_drift, reg_drift
-ok(f"matrix: {bpd.GENERAL_REGISTERED_OUT} equals the source `Registered` for all 84")
+ok(f"matrix: {bpd.GENERAL_REGISTERED_OUT} equals the source `Registered` for all "
+   f"{len(matched_general)}")
+
+# Decision 2b's guard was authored over the 85 canvassed codes, whose four files
+# all agree.  Widening the universe puts 45 crosswalk-only precincts on that same
+# governor-figure path while their files disagree (1305: governor/senate/county
+# 1840 against city 0), so the guard does NOT silently widen with them -- the
+# build reports the count instead of aborting.  Both halves are asserted: the
+# canvassed population still aborts, and the added population is visible.
+def _registered_seen(code):
+    return {v for _, v in bpd.registered_values(GOV_IDX, SEN_IDX, PROPS_IDX, code)}
+CANVASS_DISAGREE = sorted(c for c in CANVASSED_CODES if len(_registered_seen(c)) > 1)
+assert not CANVASS_DISAGREE, f"the aborting guard now covers disagreeing rows: {CANVASS_DISAGREE}"
+ADDED_DISAGREE = sorted(c for c in ADDED_CODES if len(_registered_seen(c)) > 1)
+assert len(ADDED_DISAGREE) == 45, len(ADDED_DISAGREE)
+_reg_line = [ln for ln in build_report.splitlines()
+             if "Registered` disagrees across files" in ln]
+assert _reg_line and f"({len(ADDED_DISAGREE)})" in _reg_line[0], _reg_line
+for _c in ADDED_DISAGREE[:1]:  # the shipped value is the governor file's, either way
+    assert rebuilt[_c][bpd.GENERAL_REGISTERED_OUT] == GOV_IDX[_c][bpd.GENERAL_REGISTERED_COL].strip()
+ok("matrix: Registered disagreement still aborts for canvassed codes and is "
+   f"reported, not swallowed, for the added ones", f"{len(ADDED_DISAGREE)} codes")
 
 # A swap of the city and county rows would be invisible if the two measures were
 # always equal, so prove they are genuinely different contests.  Asserted as
@@ -876,18 +1135,35 @@ for _prop in ("city", "county"):
     assert _rep and "1046" in _rep[0], _rep
 ok("matrix: 1046 blank across all 25 new fields and named in the report, 4 ways")
 
-# Matrix "Blank source cell" / "Zero-vs-blank": the only empty cell in each new
-# field is 1046, and a recorded 0 stays 0 rather than reading as a gap.  1050
-# (governor Other) and 4141 (Senate Other) are real zeros in the source.
+# Matrix "Blank source cell" / "Zero-vs-blank" over the WIDENED universe. The
+# only empty cell used to be 1046, because the extract held only precincts a
+# canvass workbook named and all of them but 1046 appeared in the three 2026
+# files.  Now the blanks are a population -- 116 codes with no row at all in a
+# race file, 409 with no `city` proposition row, plus the handful whose matched
+# row leaves a measure empty -- so each field's blank set is re-derived from the
+# raw file it came from through FIELD_SOURCE, exactly as the builder joined it.
+# 1046 stays named as the exemplar: it is one of the 116.
+assert "1046" not in GOV_IDX and "1046" not in SEN_IDX and "1046" not in PROPS_IDX
 for _c in GENERAL_COLS:
-    _empties = [p for p in rebuilt if rebuilt[p][_c] == ""]
-    assert _empties == ["1046"], f"{_c}: unexpected empty rows {_empties}"
-    assert "1 of 85 rows empty" in fresh_dict[_c]["description"], _c
+    _empties = {p for p in rebuilt if rebuilt[p][_c] == ""}
+    if _c == bpd.GENERAL_REGISTERED_OUT:
+        _expect = {p for p in rebuilt if (GOV_IDX.get(p) or {}).get(
+            bpd.GENERAL_REGISTERED_COL, "").strip() == ""}
+    else:
+        _contest, _src = FIELD_SOURCE[_c]
+        _expect = {p for p in rebuilt if (general_source(_contest, p) or {}).get(
+            _src, "").strip() == ""}
+    assert _empties == _expect, (
+        f"{_c}: {len(_empties)} blank rows, expected {len(_expect)} "
+        f"{sorted(_empties ^ _expect)[:5]}")
+    assert f"{len(_empties)} of {len(rebuilt)} rows empty" in fresh_dict[_c]["description"], (
+        _c, fresh_dict[_c]["description"][-70:])
 assert rebuilt["1050"]["2026_gov_votes_Other"] == "0", rebuilt["1050"]["2026_gov_votes_Other"]
 assert rebuilt["1050"]["2026_gov_percent_Other"] == "0", rebuilt["1050"]["2026_gov_percent_Other"]
 assert rebuilt["4141"]["2026_sen_votes_Other"] == "0", rebuilt["4141"]["2026_sen_votes_Other"]
 assert rebuilt["4141"]["2026_sen_percent_Other"] == "0", rebuilt["4141"]["2026_sen_percent_Other"]
-ok("matrix: 1046 alone is empty in all 25 fields; a genuine 0 ships as 0",
+ok(f"matrix: blank 2026 cells are exactly the precincts the source files do not "
+   f"cover, per field over {len(rebuilt)} rows; a genuine 0 still ships as 0",
    f"{len(GENERAL_COLS)} fields")
 
 # Decision 3a/3b: the four superseded placeholders leave the OUTPUT but stay in
@@ -902,10 +1178,237 @@ assert bpd.RETIRED_GENERAL_COLS and all(
 ), "a retired placeholder was dropped from the .ods union read, changing dedupe scoring"
 assert "2026_registered" in header, "the canvass-period registered figure was removed with them"
 # Compared as a set: which precincts are blank is the fact, and extract row order
-# is not something any acceptance criterion fixes.
-assert {p for p in rebuilt if rebuilt[p]["2026_registered"] == ""} == {"2039", "1046"}, \
-    "the canvass-period registered figure changed population"
-ok("matrix: 4 placeholders out of the extract, still read from the .ods union; 2026_registered intact")
+# is not something any acceptance criterion fixes.  The widening grows this
+# population on purpose -- a crosswalk-only precinct was never canvassed, so it
+# has no canvass-period registered figure -- so the assertion splits: the
+# canvassed 85 keep exactly the blanks they had, and every added code joins them.
+assert {p for p in CANVASSED_CODES if rebuilt[p]["2026_registered"] == ""} == {"2039", "1046"}, \
+    "the canvass-period registered figure changed population among canvassed precincts"
+assert all(rebuilt[p]["2026_registered"] == "" for p in ADDED_CODES), \
+    "an added precinct shipped a canvass-period figure it never recorded"
+ok("matrix: 4 placeholders out of the extract, still read from the .ods union; "
+   "2026_registered unchanged for canvassed rows, blank for added ones")
+
+# ===========================================================================
+# The widened population: the matrix rows this plan adds coverage for
+# ===========================================================================
+# Matrix row "In crosswalk, absent from the .ods union" (1044, 3111 as named by
+# the plan) and its flip side, "Precinct already in the extract": the added rows
+# carry dominant-VTD DFS demographics with every .ods-derived and canvass column
+# blank, and the 85 originals byte-identical.  Column names come from the
+# extract's own header, and the list is then required to be non-empty and to
+# cover the columns the plan says must stay blank -- a column renamed out of the
+# header cannot hide behind a stale literal (`registered` does not exist here;
+# the canvass-period column is `2026_registered`).
+DFS_RAW_COLS = list(csv.DictReader(open(
+    BASE / "data/raw/dfs-export-precinct-20261108/data.csv", newline="", encoding="utf-8")).fieldnames or [])
+ODS_IN_HEADER = [c for c in ODS_COLS if c in header]
+# Canvass-period metrics and provenance: present in the .ods union, so an added
+# row has no source for them.  The three 2024 shares the roll-up supersedes are
+# excluded -- the roll-up DOES cover added precincts and fills them, which is the
+# ordering the plan requires (asserted below).
+OVERLAID = set(bpd.COMB_OVERLAYS.values())
+BLANK_BY_CONSTRUCTION = [
+    c for c in ODS_IN_HEADER + [bpd.RESPONSE_COUNT_COL, bpd.NO_PCT_COL]
+    if c != bpd.PRECINCT_COL and c not in OVERLAID
+]
+assert BLANK_BY_CONSTRUCTION, "the .ods union contributes no output column"
+assert all(c in header for c in BLANK_BY_CONSTRUCTION), \
+    sorted(set(BLANK_BY_CONSTRUCTION) - set(header))
+for _c in ("precinct_group", "district", "sheet_column_alignment", "source_file",
+           "canvass_attempts", "response_rate", "strong_no", "2024_turnout",
+           "2026_registered", bpd.RESPONSE_COUNT_COL, bpd.NO_PCT_COL):
+    assert _c in BLANK_BY_CONSTRUCTION, f"{_c} left out of the blank-by-construction set"
+_filled = {(c, p) for p in ADDED_CODES for c in BLANK_BY_CONSTRUCTION if rebuilt[p][c] != ""}
+assert not _filled, f"an added precinct carries a canvass figure it never recorded: {sorted(_filled)[:6]}"
+ok("matrix: added rows leave every .ods-derived and canvass column blank",
+   f"{len(BLANK_BY_CONSTRUCTION)} columns x {len(ADDED_CODES)} rows")
+
+# ...while the DFS demographic block arrives verbatim from the dominant VTD's
+# row, and the official results fill the added rows too (join ordering).
+DFS_FILLED = [c for c in DFS_RAW_COLS if c in header]
+assert DFS_FILLED, "no DFS column reached the extract header"
+_dfs_expect = {r["source_ref"].strip(): r for r in csv.DictReader(open(
+    BASE / "data/raw/dfs-export-precinct-20261108/data.csv", newline="", encoding="utf-8"))}
+_drift = []
+for _p in ADDED_CODES:
+    _row = rebuilt[_p]
+    _src = _dfs_expect.get(_row.get("census_vtd_geoid", "").strip())
+    if _src is None:
+        _drift.append((_p, "chosen VTD has no DFS row"))
+        continue
+    for _c in DFS_FILLED:
+        if _row[_c] != _src[_c]:
+            _drift.append((_p, _c, _row[_c], _src[_c]))
+assert not _drift, f"added rows do not copy their VTD's DFS row verbatim: {_drift[:6]}"
+ok("matrix: every added row copies its dominant VTD's DFS row verbatim",
+   f"{len(DFS_FILLED)} columns x {len(ADDED_CODES)} rows")
+_added_rollup = [p for p in ADDED_CODES if p in dallas_rollup]
+assert _added_rollup and all(
+    rebuilt[p]["2024_kamala"] == dallas_rollup[p]["2024_percent_Harris"].strip()
+    for p in _added_rollup), "the roll-up join did not reach the added rows"
+ok("matrix: official results fill the added rows too (widening precedes the joins)",
+   f"{len(_added_rollup)} added precincts matched the roll-up")
+
+# --- matrix row "Precinct maps to several VTDs": the winner rule -------------
+# Recomputed independently for ALL 820 codes straight from the crosswalk and the
+# DFS export, then compared to what the extract actually kept.  The rule is
+# spelled out here as the builder's own tuple -- fullness first, then the share,
+# with a MISSING share scoring -1.0 -- because `as_number(share) or -1.0` would
+# collapse a recorded `0.0` (23 crosswalk rows hold one) into "missing": the
+# blank-vs-zero conflation this repo forbids.  `complement()` is applied to
+# `pct_renter_occupied` BEFORE scoring, exactly as the join loop does, or the
+# derived column would score differently on the two paths.
+_cw_by_geoid = {r["source_ref"].strip(): r for r in csv.DictReader(open(
+    BASE / "data/raw/dfs-export-precinct-20261108/data.csv", newline="", encoding="utf-8"))}
+_cw_by_precinct: "dict[str, list[dict[str, str]]]" = {}
+for _r in crosswalk_rows:
+    if _r[CROSSWALK_ID_COL].strip():
+        _cw_by_precinct.setdefault(_r[CROSSWALK_ID_COL].strip(), []).append(_r)
+SKIP_COLS = {bpd.PRECINCT_COL, bpd.GROUP_COL, "district", bpd.ALIGN_COL, "source_file"}
+COUNTED = [c for c in header if c not in SKIP_COLS]
+
+
+def _candidate(code, mapping):
+    """The joined candidate row one (precinct, VTD) pair would produce."""
+    row = {c: "" for c in header}
+    row[bpd.PRECINCT_COL] = code
+    row.update(mapping)
+    _dfs = _cw_by_geoid.get(mapping["census_vtd_geoid"].strip())
+    if _dfs is not None:
+        row.update(_dfs)
+    row[bpd.RENTER_COL] = bpd.complement(row.get("pct_owner_occupied"))
+    return row
+
+
+def _winner_rule(row):
+    share = dashboard.to_float(row.get(bpd.SHARE_COL))
+    return (bpd.fullness(row, COUNTED), share if share is not None else -1.0)
+
+
+def _expected_vtd(code):
+    cands = [_candidate(code, m) for m in _cw_by_precinct[code]]
+    return max(cands, key=_winner_rule)
+
+
+_wrong = []
+for _code in sorted(_cw_by_precinct):
+    if _code not in rebuilt:
+        continue
+    _exp = _expected_vtd(_code)
+    if rebuilt[_code]["census_vtd_geoid"] != _exp["census_vtd_geoid"]:
+        _wrong.append((_code, rebuilt[_code]["census_vtd_geoid"], _exp["census_vtd_geoid"]))
+assert not _wrong, f"the extract's VTD is not the winner rule's: {_wrong[:6]}"
+# The builder's shared rule and this independently-written one must agree on
+# every crosswalk code, so neither can drift into `or -1.0` territory silently.
+_agree = all(
+    _winner_rule(_candidate(_c, _m)) == bpd.row_rank(_candidate(_c, _m), COUNTED)
+    for _c in _cw_by_precinct for _m in _cw_by_precinct[_c])
+assert _agree, "bpd.row_rank() no longer matches the fullness-then-share rule"
+# ...and falsified on the exact case the conflation would get wrong: a recorded
+# 0.0 share must beat a missing one, not tie it.
+_z = {bpd.SHARE_COL: "0.0", bpd.PRECINCT_COL: "x"}
+_n = {bpd.SHARE_COL: "", bpd.PRECINCT_COL: "x"}
+assert _winner_rule(_z) > _winner_rule(_n), "a recorded 0.0 share read as missing"
+assert bpd.row_rank(_z, COUNTED) > bpd.row_rank(_n, COUNTED), "bpd.row_rank() maps 0.0 to missing"
+ok("matrix: the winner rule is fullness-then-share for all 820 codes, "
+   "0.0 kept as a value", f"{len(_cw_by_precinct)} codes")
+
+# Witnesses the frozen matrix names: fullness OVERRIDING the bigger share, and
+# the ties the share alone decides.  Both are recomputed from the raw crosswalk,
+# never copied from the extract.  A "tie" is on the FULLNESS component alone --
+# the rank tuple's second element is the tie-break itself, so comparing whole
+# tuples would find no tie at all and the check would report an empty list.
+_over, _ties = [], []
+for _c in sorted(_cw_by_precinct):
+    if _c not in rebuilt or len(_cw_by_precinct[_c]) < 2:
+        continue
+    _scored = [(_winner_rule(_candidate(_c, _m)), _m["census_vtd_geoid"],
+                dashboard.to_float(_m[bpd.SHARE_COL])) for _m in _cw_by_precinct[_c]]
+    _top_full = max(s[0][0] for s in _scored)
+    _tied = [s for s in _scored if s[0][0] == _top_full]
+    _best_share = max((s[2] for s in _scored if s[2] is not None), default=None)
+    if len(_tied) > 1:
+        _ties.append(_c)          # equal fullness: the share alone decides
+    elif _tied[0][2] != _best_share:
+        _over.append((_c, _tied[0][2], _best_share))  # fullness beat the bigger share
+# Split by population.  For a CANVASSED code the .ods-derived columns repeat
+# identically across every VTD candidate -- the fan-out copies one precinct row
+# -- so they shift all candidates' fullness by the same amount and preserve the
+# ORDERING, but my reconstruction is only byte-identical to the builder's rows
+# for the crosswalk-only codes.  The plan's witnesses are therefore asserted on
+# the added population, where the reconstruction is exact; the canvassed codes
+# that also tie are reported, not claimed.
+_over = [o for o in _over if o[0] in ADDED_CODES]
+_ties = [c for c in _ties if c in ADDED_CODES]
+assert [o[0] for o in _over] == ["1315", "1724"], _over
+assert sorted(_ties) == ["1044", "1104", "1107", "1300", "1305", "3327", "3504",
+                         "4537", "4662"], _ties
+# Each tie really is decided by the share, and the winner is the biggest share.
+for _c in _ties:
+    _shares = sorted((dashboard.to_float(_m[bpd.SHARE_COL]) for _m in _cw_by_precinct[_c]),
+                     reverse=True)
+    assert len(set(_shares)) == len(_shares), (_c, _shares)  # share, not order, decides
+    assert rebuilt[_c][bpd.SHARE_COL] != "", (_c, rebuilt[_c][bpd.SHARE_COL])
+    assert dashboard.to_float(rebuilt[_c][bpd.SHARE_COL]) == _shares[0], (_c, _shares)
+# The overriding rows really do sit on a MINORITY VTD, and really are the fuller
+# one -- i.e. the two exceptions are the rule working, not a bug.
+for _c, _share, _sibling in _over:
+    assert _share < _sibling, (_c, _share, _sibling)
+    assert _share < 0.5, f"{_c}: attributed to a VTD covering most of it"
+    _alts = {dashboard.to_float(_m[bpd.SHARE_COL]): _m["census_vtd_geoid"]
+             for _m in _cw_by_precinct[_c]}
+    _biggest = max(_alts)
+    assert rebuilt[_c]["census_vtd_geoid"] == _alts[_share], (_c, rebuilt[_c]["census_vtd_geoid"])
+    assert _biggest == _sibling and _share < _biggest, (_c, _share, _biggest)
+ok("matrix: 1315/1724 prove fullness outranks share (0.115 / 0.144 kept over "
+   "0.884 / 0.851)", f"{len(_ties)} ties left to the share")
+ok("matrix: 9 codes tie on fullness, so the largest share decides", f"{_ties}")
+
+# --- matrix row "VTD's DFS cells empty": blanks stay blank, never 0 ----------
+# The three codes whose dominant VTD carries no demographic figure at all are
+# named by the plan (2607, 3111, 4116).  Recomputed from the raw DFS export:
+# a code belongs here exactly when its chosen VTD's DFS row holds no figure.
+_fig_cols = bpd.dfs_figure_columns(DFS_RAW_COLS)
+assert _fig_cols and all(c in header for c in _fig_cols), _fig_cols[:6]
+_expect_blank = sorted(
+    c for c in _cw_by_precinct
+    if c in rebuilt and c in ADDED_CODES
+    and bpd.fullness(_expected_vtd(c), _fig_cols) == 0)
+_named = [p for p in ADDED_CODES
+          if all(rebuilt[p][c] == "" for c in _fig_cols if c in header)]
+assert _expect_blank == _named, (_expect_blank, _named)
+assert _named == ["2607", "3111", "4116"], _named
+for _c in _named:
+    # Blank means no figure, so NOTHING numeric arrived for them: not a 0, not a
+    # rounded complement, not the canvass-era derived ratio.
+    _filled = [k for k, v in rebuilt[_c].items()
+               if k not in SKIP_COLS and v != "" and k in set(_fig_cols) | {bpd.RENTER_COL}]
+    assert not _filled, f"{_c}: a figure was invented {_filled}"
+    assert rebuilt[_c][bpd.RENTER_COL] == "", _c
+    # ...while the VTD identity columns still arrived, proving the row exists.
+    assert rebuilt[_c]["census_vtd_geoid"] and rebuilt[_c]["source_ref"], _c
+# The generator reports the same three, with a count so "checked, none" is
+# distinguishable from a report that cannot fire (review findings 2 and 15).
+_fig_line = [ln for ln in build_report.splitlines() if "no DFS figure" in ln]
+assert len(_fig_line) == 1, _fig_line
+assert f"({len(_named)})" in _fig_line[0], _fig_line
+for _c in _named:
+    assert _c in _fig_line[0], (_c, _fig_line[0])
+_dfs_line = [ln for ln in build_report.splitlines() if "no DFS row" in ln]
+assert len(_dfs_line) == 1 and "(0)" in _dfs_line[0], _dfs_line
+_add_line = [ln for ln in build_report.splitlines() if "crosswalk precincts added" in ln]
+assert len(_add_line) == 1 and f"{len(ADDED_CODES)}" in _add_line[0], _add_line
+ok("matrix: VTDs with no figures stay blank across all 3 codes, named with a "
+   "count on stdout", f"{_named}")
+# ...and reconcile() owns the count in the dictionary: every scored figure
+# column reports exactly these rows as empty.
+for _c in _fig_cols:
+    if _c in fresh_dict:
+        assert f"{len(_named)} of {len(rebuilt)} rows empty" in fresh_dict[_c]["description"] \
+            or "blank for" in fresh_dict[_c]["description"], (_c, fresh_dict[_c]["description"][-80:])
+ok("matrix: the blank-figure rows are counted by reconcile(), never typed in",
+   f"{len(_fig_cols)} DFS figure columns")
 
 # Dictionary side: one row per new field, votes/registered integer and percent
 # number (decision 4a), and no new field falling through to the fallback.
@@ -1197,6 +1700,93 @@ assert [o for o in side.options] == choropleth_labels, side.options
 assert set(dashboard.CHOROPLETH_FIELDS) < set(dashboard.TOOLTIP_FIELDS), (
     dashboard.CHOROPLETH_FIELDS, dashboard.TOOLTIP_FIELDS
 )
+# --- AC1: the panel resolves a row for a precinct no workbook named --------
+# The whole point of the widening, asserted on the RENDERED panel: the same 17
+# labelled metrics for every crosswalk precinct, a value where the dominant
+# VTD's DFS row carries one and the no-data line where it does not.  The frozen
+# matrix governs the blank case -- 2607, 3111 and 4116 land on VTDs with no
+# figures at all, so their panel is 17 em-dashes and that is CORRECT, not a
+# defect.  So the population is partitioned up front over all 735 added codes
+# and every one is classified: a test set filtered to the rows that satisfy the
+# property being asserted would pass while hiding exactly those three.
+_FULL, _BLANK = [], []
+for _c in ADDED_CODES:
+    _vals = [dashboard.to_float(rebuilt[_c].get(_f)) for _f in panel]
+    if all(v is not None for v in _vals):
+        _FULL.append(_c)
+    elif all(v is None for v in _vals):
+        _BLANK.append(_c)
+    else:
+        raise AssertionError(
+            f"{_c}: only some panel metrics carry a figure {[f for f, v in zip(panel, _vals) if v is None]}")
+assert len(_FULL) + len(_BLANK) == len(ADDED_CODES), (len(_FULL), len(_BLANK))
+assert _BLANK == ["2607", "3111", "4116"], _BLANK
+assert len(_FULL) == len(ADDED_CODES) - 3, len(_FULL)
+# Never invent a 0: the blank rows hold not even a zero in a panel column, and
+# they are not dropped -- they are rows, named here and by the build's stdout.
+for _c in _BLANK:
+    assert not any(rebuilt[_c].get(_f) not in ("", None) for _f in panel), _c
+
+# The rendered panel, driven through main()'s own click path for a sample that
+# includes both partitions and the plan's two exemplars (1044 added with
+# figures, 3111 added without).  17 rows, labelled, no raw field name, no
+# traceback, and the value/no-data split matching the extract cell for cell.
+_labels = [dashboard.label_for(dictionary, _f) for _f in panel]
+_probe_codes = [c for c in ("1044", "3111", "2607", "4116", "1315", "1724") if c in ADDED_CODES]
+assert set(_probe_codes) <= set(_FULL) | set(_BLANK)
+for _c in _probe_codes:
+    _want_blank = _c in _BLANK
+    _at = run_app(fc=stub_fc([_c]), selected={dashboard.JOIN_LAYER_KEY: _c})
+    assert len(_at.dataframe) == 1, f"{_c}: the panel rendered no table"
+    _frame = _at.dataframe[0].value
+    assert list(_frame.columns) == ["Metric", "Value"], _frame.columns
+    assert len(_frame) == 17, (_c, len(_frame))
+    assert list(_frame["Metric"]) == _labels, (_c, list(_frame["Metric"]))
+    _shown = " ".join(_frame["Metric"])
+    assert not [_f for _f in dashboard.DETAIL_FIELDS if _f in _shown], (_c, _shown)
+    for _f, _v in zip(panel, _frame["Value"]):
+        _cell = dashboard.to_float(rebuilt[_c].get(_f))
+        if _cell is None:
+            assert _v == dashboard.NO_DATA_TEXT, (_c, _f, _v)
+            assert _v != "0", (_c, _f)
+        else:
+            assert _v != dashboard.NO_DATA_TEXT, (_c, _f)
+    if _want_blank:
+        assert list(_frame["Value"]) == [dashboard.NO_DATA_TEXT] * 17, _c
+    assert not any("no data in this research extract" in i.value for i in _at.info), _c
+ok("AC1: a crosswalk precinct no workbook named renders the same 17 labelled "
+   "metrics, blank where its VTD has no figures", f"{len(_FULL)} with figures, "
+   f"{len(_BLANK)} blank: {_BLANK}")
+
+# Matrix row "Polygon with no crosswalk entry": the info path, asserted on the
+# RENDERED st.info channel -- not on a direct detail_records() call, which
+# returns [] on its first line for a None row and therefore proves nothing
+# about what the browser received (AGENTS.md's shipped-defect class).
+for _orphan in ("30A4", "2013"):
+    assert _orphan not in CROSSWALK_CODES, _orphan
+    _at = run_app(fc=stub_fc([_orphan]), selected={dashboard.JOIN_LAYER_KEY: _orphan})
+    assert _at.dataframe == [], f"{_orphan}: a row was invented for a crosswalk-less polygon"
+    _infos = [i.value for i in _at.info]
+    assert any("no data in this research extract" in v for v in _infos), (_orphan, _infos)
+    assert any(_orphan in v for v in _infos), (_orphan, _infos)
+ok("matrix: a crosswalk-less polygon takes the rendered st.info path, no table",
+   "30A4, 2013")
+
+# Matrix row "Field blank across all rows": the panel stays 17 metrics over the
+# WIDENED extract -- the 9 all-blank fields are still blank in all 820 rows, so
+# the decision is unchanged by 735 new rows, and it is recomputed from them.
+assert len(dashboard.detail_panel_fields(rows)) == 17, len(rows)
+assert len(dashboard.NO_DATA_FIELDS) == 9
+assert len(panel) == 17
+_still_blank = [f for f in dashboard.DETAIL_FIELDS
+                if not any(dashboard.to_float(r.get(f)) is not None for r in rows)]
+assert _still_blank == dashboard.NO_DATA_FIELDS, _still_blank
+_populate_panel = [f for f in dashboard.DETAIL_FIELDS
+                   if any(dashboard.to_float(r.get(f)) is not None for r in rows)]
+assert _populate_panel == panel, (_populate_panel, panel)
+ok("AC4: detail_panel_fields is still 17 over 820 rows, NO_DATA_FIELDS still 9",
+   f"{len(rows)} rows")
+
 # --- the overlay drop-down, on the rendered sidebar -----------------------
 # prompt.md:155-156 asks for a drop-down with this exact title defaulting to
 # "Yes", and the plan puts it directly beneath the colour selectbox.  Asserted on
@@ -1369,14 +1959,22 @@ assert len(at6.html) == 1, f"expected one legend block, got {len(at6.html)}"
 rendered_legend = at6.html[0].value
 assert rendered_legend == dashboard.legend_html(share_domain), "legend did not follow the field"
 assert [t.value for t in at6.title] == [share_label], at6.title
-for endpoint in share_domain:
+# Compared against the legend's own <span> LABELS, never as substring membership
+# of the whole block: `domain` is now 0.0-1.0, whose "0.0%" is a substring of the
+# "100.0%" the gradient markup legitimately carries, so a substring test would
+# pass for the wrong reason in either direction.
+_legend_labels = re.findall(r"<span>([^<]*)</span>", rendered_legend)
+assert len(_legend_labels) == 2, _legend_labels
+for endpoint, label in zip(share_domain, _legend_labels):
     pct = dashboard.format_value(endpoint, True)
-    assert pct.endswith("%") and pct in rendered_legend, (endpoint, pct, rendered_legend)
+    assert pct.endswith("%") and label == pct, (endpoint, label, pct)
+    assert _legend_labels[1] != _legend_labels[0], _legend_labels
 # the default metric's endpoints must be gone, not merely superseded below
 _default_domain = dashboard.field_domain(rows, dashboard.DEFAULT_CHOROPLETH)
-assert dashboard.format_value(_default_domain[1], True) not in rendered_legend
-assert dashboard.format_value(_default_domain[0], True) not in rendered_legend
-ok("a new 2026 field renders a percent legend from its own range", share_label)
+for endpoint in _default_domain:
+    assert dashboard.format_value(endpoint, True) not in _legend_labels, (
+        endpoint, _legend_labels)
+ok("a new 2026 field renders a percent legend from its own range", f"{_legend_labels}")
 
 expected_colored = populated[dashboard.DEFAULT_CHOROPLETH]
 expected_remaining = stats["polygons"] - expected_colored

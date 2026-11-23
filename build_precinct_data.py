@@ -19,6 +19,13 @@ Pipeline
    ``response_count`` = round(canvass_attempts * response_rate),
    ``prop_a_city_no_canvassing_pct`` = strong_no / response_count and
    ``pct_renter_occupied`` = 1 - pct_owner_occupied.
+   The row universe is then widened from "precincts a canvass workbook named" to
+   "precincts the VTD crosswalk knows": ``crosswalk_only_rows()`` appends one row
+   for every crosswalk precinct code the union did not already carry, attributed to
+   the census VTD covering most of it by the same winner rule as step 5, and copies
+   that VTD's DFS row verbatim.  Those rows have no canvass history, so every
+   ``.ods``-derived column -- the canvass metrics, the workbooks' provenance and
+   both canvass-era derived ratios -- stays blank rather than being inferred.
    The county results roll-up ``data/raw/precinct_comb.csv`` joins on
    ``county == "Dallas"`` plus the precinct code compared as TEXT -- and it joins
    only AFTER step 5 has collapsed the table to one row per precinct, never
@@ -47,11 +54,32 @@ ONE ROW PER PRECINCT
 The crosswalk maps a precinct to one to four census VTDs, so joining it fans
 each precinct out to that many rows.  ``dedupe_output_by_precinct()`` collapses
 them back to one row per precinct before writing, keeping the row with the most
-non-blank figures, tie-broken by the largest ``share_of_county_precinct`` --
-i.e. the VTD covering most of the precinct, whose DFS demographics describe it
-best.  The collapsed-away VTDs are reported on stdout (geoid and share) rather
-than silently discarded: their demographics are still reachable through
-``data/raw/dallas_vtd_to_county_precinct.csv`` if a per-VTD grain is wanted.
+non-blank figures, tie-broken by the largest ``share_of_county_precinct``.
+``row_rank()`` is that rule and is used twice: here, and by
+``crosswalk_only_rows()`` when it picks the dominant VTD for a precinct the
+canvass workbooks never named.  Fullness wins outright, so the share is a
+tie-break, not the criterion: two precincts (1315, 1724) land on a VTD covering
+only 0.115 / 0.144 of them because the fuller DFS row beat the bigger sliver,
+which is why the demographic columns describe the *chosen* VTD rather than
+guaranteed the largest one.  The collapsed-away VTDs are reported on stdout
+(geoid and share) rather than silently discarded: their demographics are still
+reachable through ``data/raw/dallas_vtd_to_county_precinct.csv`` if a per-VTD
+grain is wanted.
+
+A precinct, not a VTD, is the grain: the output holds one row per precinct code
+(820 rows over 820 codes), so ``census_vtd_id`` / ``census_vtd_geoid`` /
+``share_of_county_precinct`` name the ONE VTD whose figures were kept, not a
+membership the precinct also has in every other VTD it touches.
+
+THE `name` TRAP
+The DFS export's ``name`` column is a VTD identifier, not a seat name:
+``source_ref == "48113" + name``, exactly as ``census_vtd_geoid == "48113" +
+census_vtd_id``.  Because the county's precinct codes and the county's VTD
+identifiers are both four digits, a ``name`` coincides with a precinct code for
+many rows -- and describes different ground when it does.  Precinct 3011 reads
+3033 people if you look ``name == "3011"`` up, and 11251 if you follow the
+crosswalk.  Nothing in this build keys off DFS ``name``; attribution goes
+``dallas_county_precinct_id`` -> ``census_vtd_geoid`` -> ``source_ref`` only.
 
 ALIGNMENT
 Several District 2 sheets have their metric values keyed one column to the LEFT
@@ -546,32 +574,63 @@ def load_general_props(path, union_keys):
     return index, len(rows)
 
 
-def assert_registered_agreement(gov, sen, props, codes):
-    """Decision 2b: the four files must agree on `Registered` per matched precinct.
+def registered_values(gov, sen, props, code) -> "list[tuple[str, str]]":
+    """The `Registered` figures the four 2026 files record for one precinct.
 
-    County-wide 48 of 791 precincts disagree; none of ours does.  Taking the
-    governor file's figure without checking would promote that contradiction
-    silently, so a disagreement aborts naming the precinct and each file's value.
-    A blank is "not recorded" rather than a rival value, so it does not clash.
+    Contest name and value for every file holding a non-blank figure: a blank is
+    "not recorded" rather than a rival value, so it never joins the list.
+    """
+    seen = []
+    for contest, source in (
+        ("governor", gov.get(code)),
+        ("senate", sen.get(code)),
+        ("city", (props.get(code) or {}).get("city")),
+        ("county", (props.get(code) or {}).get("county")),
+    ):
+        if source is None:
+            continue
+        value = (source.get(GENERAL_REGISTERED_COL) or "").strip()
+        if value:
+            seen.append((contest, value))
+    return seen
+
+
+def assert_registered_agreement(gov, sen, props, codes) -> None:
+    """Decision 2b: the canvassed precincts must agree on `Registered`.
+
+    County-wide 48 of 791 precincts disagree.  The guard runs over the precincts
+    the canvass workbooks named (the union keys), and none of those disagrees, so
+    a contradiction still aborts here.  It deliberately does NOT cover the
+    crosswalk-only rows widened in afterwards: 45 of those DO disagree across the
+    four files (1305: governor/senate/county `1840` against city `0`), and each
+    ships the governor figure -- the best-supported of the four, since the city
+    file records `0` where that ballot question had no votes.  Aborting the build
+    on them would widen a human-authored guard without human sign-off, so they
+    are counted and reported on stdout instead; see `registered_disagreements`.
     """
     for code in sorted(codes):
-        seen = []
-        for contest, source in (
-            ("governor", gov.get(code)),
-            ("senate", sen.get(code)),
-            ("city", (props.get(code) or {}).get("city")),
-            ("county", (props.get(code) or {}).get("county")),
-        ):
-            if source is None:
-                continue
-            value = (source.get(GENERAL_REGISTERED_COL) or "").strip()
-            if value:
-                seen.append((contest, value))
+        seen = registered_values(gov, sen, props, code)
         if len({v for _, v in seen}) > 1:
             raise SystemExit(
                 f"2026 `{GENERAL_REGISTERED_COL}` disagrees for precinct {code}: "
                 + ", ".join(f"{c}={v}" for c, v in seen)
             )
+
+
+def registered_disagreements(gov, sen, props, rows) -> "list[str]":
+    """Codes among `rows` whose four 2026 files disagree on `Registered`.
+
+    The report for the widened universe: the emitted row still carries the
+    governor figure, so this is a visibility gap rather than a wrong number.
+    Recomputes the same comparison `assert_registered_agreement()` aborts on, via
+    the same `registered_values()` reader, so the two cannot drift apart.
+    """
+    out = []
+    for row in rows:
+        code = (row.get(PRECINCT_COL) or "").strip()
+        if code and len({v for _, v in registered_values(gov, sen, props, code)}) > 1:
+            out.append(code)
+    return sorted(out)
 
 
 def apply_general(row, sources):
@@ -591,6 +650,23 @@ def apply_general(row, sources):
     gov = sources.get("gov")
     row[GENERAL_REGISTERED_OUT] = ((gov.get(GENERAL_REGISTERED_COL) if gov else None) or "").strip()
     return row
+
+
+def dfs_figure_columns(dfs_cols: "list[str]") -> "list[str]":
+    """The DFS columns that carry a demographic figure, for the blank-row audit.
+
+    ``district_id`` / ``name`` / ``body`` / ``state`` / ``source_ref`` are filled
+    on every one of the 796 export rows -- they are the row's identity, not data
+    about the ground -- so scoring them would let a VTD with no figures at all
+    read as populated, exactly as `fullness()`'s `skip` argument exists to
+    prevent.  What remains is the ACS share/median block: the figures a reader
+    would call "the demographics", which is the question the widening asks of a
+    row ("does this precinct's VTD carry any figure?").
+    """
+    identity = {"district_id", "name", "body", "state", "source_ref"}
+    return [c for c in dfs_cols if c not in identity and (
+        c.startswith(("pct_", "median_")) or c == "not_us_citizen"
+    )]
 
 
 def complement(value_raw):
@@ -674,6 +750,101 @@ def fullness(rec: "dict[str, str]", columns: "list[str]", skip: "tuple[str, ...]
     return sum(1 for c in columns if c not in skip and rec.get(c, "") != "")
 
 
+# Columns the fullness score ignores: they are filled on every row (key,
+# provenance, grain, alignment audit), so counting them would make the winner
+# rule meaningless.  Shared by `dedupe_output_by_precinct()` and
+# `crosswalk_only_rows()` so the widening scores candidates by exactly the same
+# rule the fan-out dedupe uses -- one definition, not a copy that can drift.
+DEDUPE_SKIP = (PRECINCT_COL, GROUP_COL, "district", ALIGN_COL, "source_file")
+
+
+def row_rank(row: "dict[str, str]", counted: "list[str]") -> "tuple[int, float]":
+    """The winner rule: fullest row first, tie-broken by the biggest VTD share.
+
+    `counted` is the column list the score runs over (output columns minus
+    `DEDUPE_SKIP`).  A missing `share_of_county_precinct` scores -1.0 so it loses
+    every tie, while a recorded `0.0` keeps its value: `0.0` means the crosswalk
+    measured a zero overlap, which is a figure, not an absence -- collapsing the
+    two would make an unrecorded share outrank a measured one.  Higher sorts
+    first, so `max()` and `>` both pick the winner.
+    """
+    share = as_number(row.get(SHARE_COL))
+    return (fullness(row, counted), share if share is not None else -1.0)
+
+
+def crosswalk_only_rows(
+    rows: "list[dict[str, str]]",
+    out_cols: "list[str]",
+    by_precinct: "dict[str, list[dict[str, str]]]",
+    by_geoid: "dict[str, dict[str, str]]",
+    dfs_figure_cols: "list[str]",
+) -> "tuple[list[dict[str, str]], dict[str, list]]":
+    """Append the DFS demographics of every crosswalk precinct the union did not name.
+
+    The row universe the extract reports on is the one the VTD crosswalk can
+    attribute, not the one the canvass workbooks happened to name: this turns the
+    extract from 85 canvassed precincts into every precinct code in
+    ``data/raw/dallas_vtd_to_county_precinct.csv``.  Attribution goes strictly
+    ``dallas_county_precinct_id`` -> ``census_vtd_geoid`` -> DFS ``source_ref``.
+    DFS ``name`` is never consulted: it is a VTD identifier that coincides with a
+    county precinct code for some rows and describes different ground when it
+    does (precinct 3011 reads 3033 people by ``name``, 11251 by the crosswalk),
+    so keying off it would silently borrow another geography's demographics.
+
+    One row per added code, chosen by `row_rank()` over that code's VTD
+    candidates -- the identical rule `dedupe_output_by_precinct()` applies to the
+    fan-out, so a precinct already in the extract and a precinct arriving here
+    resolve to the same VTD.  The winning DFS row is copied verbatim; every
+    ``.ods``-derived column stays blank because these precincts have no canvass
+    history, and blank is what the panel must show rather than an inferred zero.
+    ``pct_renter_occupied`` is computed with `complement()` before the candidate
+    is ranked, exactly as the join loop does, so the derived share counts toward
+    fullness on both paths.
+
+    Returns the new rows plus the audit sets: `no_dfs` (codes whose chosen VTD has
+    no DFS row at all), `no_figures` (codes whose DFS row carries no demographic
+    figure, judged against `dfs_figure_cols` only -- the identity and provenance
+    columns are filled on every DFS row and would hide a fully blank figure
+    block) and `fanout_in` (candidate rows considered, so the drop count the
+    build prints spans only rows this function actually scored).
+
+    Codes already present are left alone byte-for-byte, and a crosswalk row with
+    a blank precinct id contributes nothing: it is not a precinct.
+    """
+    present = {(r.get(PRECINCT_COL) or "").strip() for r in rows}
+    counted = [c for c in out_cols if c not in DEDUPE_SKIP]
+    added, no_dfs, no_figures = [], [], []
+    fanout_in = 0
+    for code in sorted(by_precinct):
+        if not code or code in present:
+            continue
+        best: "dict[str, str] | None" = None
+        for mapping in by_precinct[code]:
+            fanout_in += 1
+            row = {c: "" for c in out_cols}
+            row[PRECINCT_COL] = code
+            row.update(mapping)
+            dfs = by_geoid.get(mapping["census_vtd_geoid"].strip())
+            if dfs is not None:
+                row.update(dfs)
+            row[RENTER_COL] = complement(row.get("pct_owner_occupied"))
+            if best is None or row_rank(row, counted) > row_rank(best, counted):
+                best = row
+        if best is None:
+            continue
+        if not best.get("source_ref"):
+            no_dfs.append(code)
+        if fullness(best, dfs_figure_cols) == 0:
+            no_figures.append(code)
+        added.append(best)
+    return added, {
+        "no_dfs": no_dfs,
+        "no_figures": no_figures,
+        "fanout_in": fanout_in,
+        "fanout_dropped": fanout_in - len(added),
+    }
+
+
 def dedupe_by_precinct(
     records: "list[OrderedDict[str, str]]", union_cols: "list[str]"
 ) -> "tuple[list[OrderedDict[str, str]], list[str]]":
@@ -727,15 +898,17 @@ def dedupe_output_by_precinct(
     full the VTD covering most of the precinct wins.  Provenance and grain
     columns are excluded from the count: they are filled on every row.
 
+    The ranking is `row_rank()`, the same rule `crosswalk_only_rows()` applies to
+    the precincts the union never named, so one precinct resolves to one VTD no
+    matter which path it arrived by.
+
     Original row order is preserved, so the output stays reproducible.
     """
-    skip = (PRECINCT_COL, GROUP_COL, "district", ALIGN_COL, "source_file")
-    counted = [c for c in out_cols if c not in skip]
+    counted = [c for c in out_cols if c not in DEDUPE_SKIP]
 
     def key(row: "dict[str, str]") -> "tuple[int, float]":
         # higher sorts first: fullest, then biggest share of the precinct
-        share = as_number(row.get(SHARE_COL))
-        return (fullness(row, counted), share if share is not None else -1.0)
+        return row_rank(row, counted)
 
     best: "dict[str, dict[str, str]]" = {}
     order: "list[str]" = []
@@ -850,6 +1023,17 @@ def main() -> None:
     # One row per precinct: the VTD fan-out above is a join artifact, not data.
     fanout_rows = len(rows)
     rows, dropped_vtd = dedupe_output_by_precinct(rows, out_cols)
+    fanout_kept = len(rows)  # scored by THIS dedupe, before the widening below
+
+    # Widen the row universe from "precincts a canvass workbook named" to
+    # "precincts the VTD crosswalk knows".  Appended AFTER both dedupes, so the
+    # fullness and alignment scoring above is byte-unchanged, and BEFORE the
+    # result joins below, so the official 2024/2026 figures fill these rows too.
+    added_rows, widening = crosswalk_only_rows(
+        rows, out_cols, by_precinct, by_geoid, dfs_figure_columns(dfs_cols)
+    )
+    rows.extend(added_rows)
+    registered_conflicts = registered_disagreements(gov, sen, props, rows)
 
     # Election results join last: the roll-up supersedes the canvass workbooks'
     # shares, and must not influence how raw .ods rows were type-checked,
@@ -898,9 +1082,23 @@ def main() -> None:
     print(f"mapping / dfs rows        : {len(map_rows)} / {len(dfs_rows)}")
     print(f"output rows               : {len(rows)} ({len(set(r[PRECINCT_COL] for r in rows))} precincts)")
     print(f"output columns            : {len(out_cols)}")
-    print(f"rows dropped as duplicate precinct ({fanout_rows - len(rows)} after joining; {len(rows)} precincts x VTDs = {fanout_rows} rows):")
+    # The fan-out dedupe collapsed `fanout_rows` joined rows down to
+    # `fanout_kept`; the widening added rows afterwards, so subtracting today's
+    # row count here would report rows this dedupe never saw.
+    print(f"rows dropped as duplicate precinct ({fanout_rows - fanout_kept} after joining; {fanout_kept} precincts x VTDs = {fanout_rows} rows):")
     for d in dropped_vtd:
         print(f"    {d}")
+    print(f"crosswalk precincts added : {len(added_rows)} "
+          f"({widening['fanout_in']} candidate rows x VTDs, "
+          f"{widening['fanout_dropped']} dropped to their dominant VTD)")
+    # Both audit lines print their count as well as the list, so "checked, none
+    # found" is distinguishable from a check that could not have fired.
+    print(f"added precincts with no DFS row          ({len(widening['no_dfs'])}): "
+          f"{sorted(widening['no_dfs'])}")
+    print(f"added precincts with no DFS figure       ({len(widening['no_figures'])}): "
+          f"{sorted(widening['no_figures'])}")
+    print(f"rows whose 2026 `Registered` disagrees across files ({len(registered_conflicts)}): "
+          f"{registered_conflicts}")
     print(f"rows repaired for alignment ({len(repaired)}):")
     for r in repaired:
         print(f"    {r}")

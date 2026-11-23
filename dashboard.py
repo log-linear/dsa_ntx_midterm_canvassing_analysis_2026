@@ -6,6 +6,13 @@ data/precinct_data.csv onto each polygon on `NewPrcnt` <->
 demographic detail panel.  Every metric is labelled with its `readable_name`
 from data/data_dictionary.csv -- never the raw field name.
 
+The extract carries a row for every precinct the VTD crosswalk can attribute,
+not only the precincts a canvass workbook named, so the detail panel resolves a
+row for 704 of the 791 polygons; a polygon the crosswalk does not reach is the
+only case that shows "no data in this research extract".  Canvass-era columns
+are still blank for the precincts nobody canvassed -- blank is what they are,
+not an absence of a row.
+
 The data layer (`fetch_features`, `load_rows`, `build_dictionary`,
 `join_precincts`, `color_scale`, `tooltip_template`) is pure and importable
 without a Streamlit run context, which is what makes the plan's edge-case matrix
@@ -127,8 +134,12 @@ NO_DATA_FIELDS = [
 ]
 
 # No data is an empty polygon: transparent fill AND no border (both requested
-# 2026-11-12), so the 707 precincts with no value paint nothing at all and are
-# discoverable only by hovering or clicking.  They stay pickable because deck.gl
+# 2026-11-12), so polygons with no value paint nothing at all and are
+# discoverable only by hovering or clicking.  The extract now carries a row for
+# every precinct the VTD crosswalk knows, so the polygons left with no row are
+# the 87 the crosswalk cannot attribute (and on the default metric the far larger
+# set of precincts nobody canvassed, which have demographics but no canvass
+# figure).  They stay pickable because deck.gl
 # rasterises the FILL sublayer -- whose shader writes the picking colour -- and
 # that sublayer does not depend on `stroked`; the picking pass renders to an FBO
 # without blending and discards on the picking-validity flag, never on alpha.
@@ -204,8 +215,10 @@ def fetch_features(url: str = LAYER_URL, timeout: int = 30) -> dict[str, Any]:
 def load_rows(path: Path = IN_CSV) -> list[dict[str, str]]:
     """The precinct rows as strings, exactly as the CSV holds them.
 
-    One row per precinct (the extract is deduplicated) and no numeric value is
-    ever averaged or aggregated across rows.
+    One row per precinct (the extract is deduplicated to the crosswalk's dominant
+    VTD for each) and no numeric value is ever averaged or aggregated across rows.
+    A precinct's demographic columns therefore describe that census VTD, not the
+    precinct as drawn on the layer.
     """
     with open(path, newline="", encoding="utf-8") as fh:
         return list(csv.DictReader(fh))
@@ -282,8 +295,10 @@ def domain_is_share(domain: tuple[float, float] | None) -> bool:
 def domain_for(values: list[float | None]) -> tuple[float, float] | None:
     """Min/max of the *populated* values: scale on the field's own range.
 
-    `2024_kamala` spans 0.51-0.85 while the default field spans 0.00-0.18, so a
-    shared domain would flatten one and crush the other.
+    `2024_kamala` spans 0.0-1.0 in the current extract (precincts recorded 0 and
+    1 votes for real once the crosswalk-only precincts joined), while the default
+    field spans 0.0-0.71, so a shared domain would flatten one and crush the
+    other.
     """
     populated = [v for v in values if v is not None]
     if not populated:
@@ -407,7 +422,7 @@ def decorate(
     domain = field_domain(rows, field)
     # Whether each tooltip field holds a share (0-1) or a count, decided once per
     # field from the whole extract -- never per value.  Outside the feature loop so
-    # 791 polygons do not each re-scan 85 rows.
+    # 791 polygons do not each re-scan all 820 rows.
     tooltip_domains = {f: field_domain(rows, f) for f in TOOLTIP_FIELDS}
     records = []
     for feature in features:
