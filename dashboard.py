@@ -64,7 +64,7 @@ CHOROPLETH_FIELDS = [
     "2026_gov_percent_Hinojosa",
     "2026_sen_percent_Talarico",
     "2026_prop_city_percent_Against",
-    "2026_prop_county_percent_Against",
+    "2026_prop_county_percent_For",
 ]
 TOOLTIP_FIELDS = [
     "prop_a_city_no_canvassing_pct",
@@ -85,7 +85,7 @@ TOOLTIP_FIELDS = [
     "2026_gov_percent_Hinojosa",
     "2026_sen_percent_Talarico",
     "2026_prop_city_percent_Against",
-    "2026_prop_county_percent_Against",
+    "2026_prop_county_percent_For",
 ]
 DEFAULT_CHOROPLETH = "prop_a_city_no_canvassing_pct"
 
@@ -766,7 +766,7 @@ def main() -> None:
         # title, defaulting to "Yes".
         show_districts = st.selectbox(
             "Show Dallas Council Districts?",
-            [DISTRICT_OFF, DISTRICT_ON],
+            [DISTRICT_ON, DISTRICT_OFF],
             index=0,
         )
         # st.caption(
