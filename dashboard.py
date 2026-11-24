@@ -178,21 +178,61 @@ NO_DATA_COLOR = [0, 0, 0, 0]
 # choropleth.  Lower it to read street names under dense precincts; raise it to
 # 255 for a solid, poster-like map.
 #
-# It lives HERE, not inside COLOR_LOW/COLOR_HIGH, on purpose: `color_scale`
-# interpolates the two endpoints with zip(), which silently truncates to the
-# shorter list, so an alpha baked into one endpoint but not the other drops the
-# alpha channel from the entire scale -- and deck.gl sizes the colour attribute
-# from the first record it sees, so a ragged mix misreads every polygon.
+# It lives HERE, not inside the viridis stops, on purpose: `color_scale`
+# interpolates a pair of stops with zip(), which silently truncates to the
+# shorter list, so an alpha baked into one stop but not its neighbour drops the
+# alpha channel from every colour that segment produces -- and deck.gl sizes the
+# colour attribute from the first record it sees, so a ragged mix misreads every
+# polygon.  Viridis ships as plain RGB for exactly this reason.
 # ---------------------------------------------------------------------------
 FILL_ALPHA = 200
 
-# The ramp, authored as plain RGB.  See the guard below.
-COLOR_LOW = [251, 210, 212]
-COLOR_HIGH = [236, 31, 39]
+# ---------------------------------------------------------------------------
+# The ramp: viridis, matplotlib's default perceptually-uniform sequential
+# colormap, authored as plain RGB (viridis's own 9 control points).  See the
+# guard below.
+#
+# Viridis replaces the old pink-to-red two-stop ramp.  Two stops only ever
+# promised one thing -- more of this hue means more of that -- and could not
+# keep lightness monotonic, so a pale pink precinct read as *less* than its
+# neighbours by colour order alone.  Viridis varies hue AND lightness, so the
+# map still separates precincts for a reader who cannot tell the hues apart and
+# when printed in greyscale.
+#
+# Nine stops, not two: linear RGB interpolation between only the endpoints of a
+# colormap cuts a chord through colour space that viridis never travels (the
+# 2-stop purple->yellow midpoint is a muddy olive, not viridis's teal). The
+# intermediate stops below are what make the ramp actually *be* viridis.
+#
+# COLOR_LOW / COLOR_HIGH name the two ENDS of the ramp -- the first and last
+# stops -- so the legend and any caller that wants "the colour at the minimum"
+# read them by name rather than indexing VIRIDIS_STOPS.  They are not the
+# ramp's whole definition; `color_scale` samples VIRIDIS_STOPS.
+# ---------------------------------------------------------------------------
+VIRIDIS_STOPS: list[tuple[float, list[int]]] = [
+    (0.000, [68, 1, 84]),     # #440154
+    (0.125, [71, 44, 122]),   # #472c7a
+    (0.250, [59, 81, 139]),   # #3b518b
+    (0.375, [44, 113, 142]),  # #2c718e
+    (0.500, [33, 144, 141]),  # #21908d
+    (0.625, [39, 173, 129]),  # #27ad81
+    (0.750, [92, 200, 99]),   # #5cc863
+    (0.875, [170, 220, 50]),  # #aadc32
+    (1.000, [253, 231, 37]),  # #fde725
+]
+COLOR_LOW = VIRIDIS_STOPS[0][1]
+COLOR_HIGH = VIRIDIS_STOPS[-1][1]
 
 assert len(COLOR_LOW) == len(COLOR_HIGH) == 3, (
-    "COLOR_LOW/COLOR_HIGH must be plain RGB (r, g, b): opacity is FILL_ALPHA's "
-    "job, and mismatched lengths truncate the whole scale via zip()"
+    "ramp endpoints must be plain RGB (r, g, b): opacity is FILL_ALPHA's job, "
+    "and mismatched lengths truncate the whole scale via zip()"
+)
+assert [t for t, _ in VIRIDIS_STOPS] == [i / 8 for i in range(9)], (
+    "viridis stops must run 0.0-1.0 inclusive in even steps: color_scale picks "
+    "the bracketing pair by index, so a gap or an unsorted stop miscolours the map"
+)
+assert all(len(rgb) == 3 for _, rgb in VIRIDIS_STOPS), (
+    "every viridis stop must be plain RGB for the same reason as the endpoints"
 )
 NO_DATA_TEXT = "\u2014"  # em-dash: no value, distinct from 0.0
 MAP_STYLE_URL = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
@@ -212,7 +252,7 @@ COUNCIL_LAYER_ID = "council_districts"
 # The council overlay's two colour knobs.  Both are RGBA (0-255 each, alpha
 # last), both are constant colours for the WHOLE layer, and neither is the
 # precinct ramp: a district boundary has to stay readable over any choropleth
-# colour underneath it, so it borrows nothing from COLOR_LOW/COLOR_HIGH.
+# colour underneath it, so it borrows nothing from VIRIDIS_STOPS.
 #
 # COUNCIL_LINE_COLOR: the district border.  A NEUTRAL ink (R == G == B) with no
 # blue cast, so it reads as a plain outline over the basemap and over any ramp
@@ -229,7 +269,7 @@ COUNCIL_LAYER_ID = "council_districts"
 # Both lists must stay length 4.  deck.gl sizes a colour attribute from the
 # first record it sees and applies that size to every record, so a ragged mix of
 # RGB and RGBA misreads the whole layer -- the same reason FILL_ALPHA lives
-# outside COLOR_LOW/COLOR_HIGH above.
+# outside the viridis stops above.
 # ---------------------------------------------------------------------------
 COUNCIL_LINE_COLOR = [150, 150, 150, 140]  # neutral ink border, no blue cast
 COUNCIL_FILL_COLOR = [200, 200, 200, 75]  # transparent light gray district wash
@@ -357,6 +397,29 @@ def domain_for(values: list[float | None]) -> tuple[float, float] | None:
     return min(populated), max(populated)
 
 
+def ramp_rgb(t: float) -> list[int]:
+    """The ramp's plain-RGB colour at position `t` (0-1).
+
+    Piecewise-linear ACROSS the viridis stops, not one interpolation between the
+    two endpoints: a straight chord from purple to yellow is a muddy olive that
+    viridis never travels, so a 2-stop "approximation" of a colormap is a
+    different colormap.  `t` is clamped, so a value outside the domain -- which
+    `color_scale` cannot produce, but a hand-passed position can -- returns the
+    nearest end colour rather than indexing off the array.
+    """
+    t = max(0.0, min(1.0, t))
+    # The stops are evenly spaced and sorted (asserted at their definition), so
+    # the bracketing pair comes straight from the index.  The last position folds
+    # onto the final pair so t=1.0 lands on COLOR_HIGH exactly.
+    last = len(VIRIDIS_STOPS) - 2
+    idx = min(int(t * (len(VIRIDIS_STOPS) - 1)), last)
+    t0, c0 = VIRIDIS_STOPS[idx]
+    t1, c1 = VIRIDIS_STOPS[idx + 1]
+    span = t1 - t0
+    local = 0.0 if span == 0 else (t - t0) / span
+    return [round(a + (b - a) * local) for a, b in zip(c0, c1)]
+
+
 def color_scale(value: float | None, domain: tuple[float, float] | None) -> list[int]:
     """The fill for one value: the ramp at `FILL_ALPHA`, or nothing at all.
 
@@ -369,9 +432,7 @@ def color_scale(value: float | None, domain: tuple[float, float] | None) -> list
         return list(NO_DATA_COLOR)
     lo, hi = domain
     t = 0.0 if hi == lo else (value - lo) / (hi - lo)
-    t = max(0.0, min(1.0, t))
-    rgb = [round(a + (b - a) * t) for a, b in zip(COLOR_LOW, COLOR_HIGH)]
-    return rgb + [FILL_ALPHA]
+    return ramp_rgb(t) + [FILL_ALPHA]
 
 
 def tooltip_template(
@@ -573,8 +634,8 @@ def detail_records(
 # ---------------------------------------------------------------------------
 # Colour legend -- pure string building, rendered by st.html under the map.
 #
-# Both swatch colours come out of `color_scale`, so the legend cannot drift from
-# the map: change COLOR_LOW, COLOR_HIGH or FILL_ALPHA and the two move together.
+# The swatches come out of `color_scale`/`ramp_rgb`, so the legend cannot drift
+# from the map: change VIRIDIS_STOPS or FILL_ALPHA and the two move together.
 # ---------------------------------------------------------------------------
 LEGEND_BAR_WIDTH = 300  # px
 LEGEND_BAR_HEIGHT = 14  # px
@@ -629,12 +690,22 @@ def legend_html(domain: tuple[float, float] | None) -> str:
         # Same decision the tooltip makes, from the same range, so the two
         # can never label one field's endpoints differently.
         share = domain_is_share(domain)
+        # `low` is the whole swatch when the field is single-valued; for a real
+        # range the gradient below carries every stop, whose last entry is the
+        # same colour `color_scale(hi, domain)` returns.
         low = _css_rgba(color_scale(lo, domain))
-        high = _css_rgba(color_scale(hi, domain))
         if lo == hi:
             swatch = f'<div style="{bar}{edge}background:{low};"></div>'
         else:
-            gradient = f"linear-gradient(90deg, {low} 0%, {high} 100%)"
+            # One CSS stop per viridis control point, so the bar shows the same
+            # colours the polygons do.  A bare 0%/100% pair would draw the
+            # straight purple->yellow chord instead: a legend promising a
+            # gradient no precinct is ever painted with.
+            stops = ", ".join(
+                f"{_css_rgba(ramp_rgb(pos) + [FILL_ALPHA])} {pos * 100:.1f}%"
+                for pos, _ in VIRIDIS_STOPS
+            )
+            gradient = f"linear-gradient(90deg, {stops})"
             swatch = f'<div style="{bar}{edge}background:{gradient};"></div>'
         scale = (
             f'<div style="{row}justify-content:space-between;'

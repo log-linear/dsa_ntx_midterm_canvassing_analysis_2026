@@ -276,6 +276,78 @@ assert len(dashboard.COLOR_LOW) == len(dashboard.COLOR_HIGH) == 3, (
 )
 ok("ramp endpoints are plain RGB; FILL_ALPHA is the only source of opacity")
 
+# --- the ramp is viridis, sampled across its stops ------------------------
+# Since 2026-11-24 the choropleth colours with viridis instead of a pink->red
+# two-stop ramp.  Two things are under test here, because either can break while
+# the map still paints a smooth purple->yellow gradient that *looks* right:
+#   (1) the endpoints are viridis's own, and
+#   (2) the interior follows viridis's curve rather than the straight CHORD
+#       between those endpoints.  A 2-stop interpolation of the endpoints is a
+#       different colormap, and the difference is only visible mid-ramp.
+assert dashboard.COLOR_LOW == [68, 1, 84], dashboard.COLOR_LOW
+assert dashboard.COLOR_HIGH == [253, 231, 37], dashboard.COLOR_HIGH
+assert dashboard.VIRIDIS_STOPS[0][1] == dashboard.COLOR_LOW
+assert dashboard.VIRIDIS_STOPS[-1][1] == dashboard.COLOR_HIGH
+ok("ramp endpoints are viridis's own (68,1,84) -> (253,231,37)")
+
+# Every stop must be reachable: `ramp_rgb` picks the bracketing pair by index,
+# so a gap or an unsorted position would miscolour the map silently.
+assert [t for t, _ in dashboard.VIRIDIS_STOPS] == [i / 8 for i in range(9)], (
+    dashboard.VIRIDIS_STOPS
+)
+assert all(len(rgb) == 3 for _, rgb in dashboard.VIRIDIS_STOPS), dashboard.VIRIDIS_STOPS
+ok("viridis ships 9 evenly-spaced plain-RGB stops")
+
+# The stops land exactly, and t=1.0 folds onto the last pair instead of
+# indexing past the array.
+for _i, (_pos, _rgb) in enumerate(dashboard.VIRIDIS_STOPS):
+    assert dashboard.ramp_rgb(_pos) == _rgb, (_pos, dashboard.ramp_rgb(_pos), _rgb)
+assert dashboard.ramp_rgb(0.0) == dashboard.COLOR_LOW
+assert dashboard.ramp_rgb(1.0) == dashboard.COLOR_HIGH
+assert dashboard.ramp_rgb(-0.5) == dashboard.COLOR_LOW, "t below 0 must clamp"
+assert dashboard.ramp_rgb(1.5) == dashboard.COLOR_HIGH, "t above 1 must clamp"
+ok("ramp_rgb hits every stop and clamps out-of-range positions")
+
+# The discriminating check: mid-ramp must be viridis's teal, NOT the chord.
+# Computed from COLOR_LOW/COLOR_HIGH here so the assertion cannot be satisfied
+# by the same constant it tests.
+_chord = [
+    round(a + (b - a) * 0.5)
+    for a, b in zip(dashboard.COLOR_LOW, dashboard.COLOR_HIGH)
+]
+_mid = dashboard.ramp_rgb(0.5)
+assert _mid != _chord, f"a 2-stop chord passed as viridis: {_mid} == {_chord}"
+assert max(abs(x - y) for x, y in zip(_mid, _chord)) > 40, (_mid, _chord)
+assert _mid == [33, 144, 141], _mid
+ok("the scale samples viridis's stops, not a purple->yellow chord",
+   f"t=.5 -> {_mid}, 2-stop chord -> {_chord}")
+
+# Perceptual monotonicity is the reason viridis replaced pink->red: lightness
+# must rise across the ramp, so the map reads in order even in greyscale or to a
+# reader who cannot separate the hues.  Checked on the relative-luminance
+# approximation rather than hue, which is the property that was asked for.
+def _lum(rgb):
+    return 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
+
+
+_samples = [dashboard.ramp_rgb(i / 200) for i in range(201)]
+_lums = [_lum(c) for c in _samples]
+assert all(b >= a - 1e-9 for a, b in zip(_lums, _lums[1:])), [
+    round(a, 1) for a, b in zip(_lums, _lums[1:]) if b < a - 1e-9
+][:5]
+assert _lums[-1] > _lums[0], (_lums[0], _lums[-1])
+ok("ramp lightness is monotonic end to end (greyscale-legible)",
+   f"{_lum(_samples[0]):.0f} -> {_lum(_samples[-1]):.0f}")
+
+# Alpha stays outside the ramp: viridis's stops are RGB, so a colour taken from
+# anywhere on the curve still gets exactly FILL_ALPHA, and no-data still short-
+# circuits before the ramp is consulted at all.
+for _v in (0.0, 0.25, 0.5, 0.75, 1.0):
+    assert len(dashboard.color_scale(_v * domain[1], domain)) == 4, _v
+    assert dashboard.color_scale(_v * domain[1], domain)[3] == dashboard.FILL_ALPHA
+assert dashboard.color_scale(None, domain) == [0, 0, 0, 0]
+ok("viridis stops are RGB only: FILL_ALPHA still reaches every painted fill")
+
 # Borders are gone, so a no-data precinct now paints literally nothing.  What
 # still has to hold is that those invisible polygons are pickable (the fill
 # sublayer is asserted above) and that the dead border colour was not left
