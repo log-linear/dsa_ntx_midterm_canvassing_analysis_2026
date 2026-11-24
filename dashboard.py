@@ -239,13 +239,29 @@ MAP_STYLE_URL = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
 LAYER_ID = "precincts"  # Layer(id=...) is required or selection state is unkeyed
 CACHE_TTL = 900  # seconds; the geometry is "Current" and reflows rarely
 
+# The council layer's district number, as the service spells it.  One name for the
+# property key, the option list and the query that builds it, so a rename on the
+# service side is a one-line fix here rather than three places that silently
+# disagree.  The values arrive as the strings "1".."14".
+DISTRICT_FIELD = "DISTRICT"
+
 # Dallas City Council districts, same FeatureServer query pattern as LAYER_URL:
 # `f=geojson` so the coordinates arrive WGS84 like the precinct layer and nothing
 # is reprojected client-side.  14 features, `maxRecordCount` 2000, so no pagination.
-COUNCIL_LAYER_URL = (
+COUNCIL_LAYER_BASE = (
     "https://services2.arcgis.com/rwnOSbfKSwyTBcwN/arcgis/rest/services/"
     "CouncilBoundaries/FeatureServer/0/query"
-    "?where=1=1&outFields=*&returnGeometry=true&f=geojson"
+)
+COUNCIL_LAYER_URL = (
+    f"{COUNCIL_LAYER_BASE}?where=1=1&outFields=*&returnGeometry=true&f=geojson"
+)
+# Same service, same field, geometry dropped.  This is what the district menu is
+# built from, and it has to stay cheap: the menu renders on every load while the
+# boundaries are drawn only when something is picked, so asking the geometry
+# endpoint for the option list would pull ~860 KB on a load that draws none of it.
+COUNCIL_OPTIONS_URL = (
+    f"{COUNCIL_LAYER_BASE}?where=1=1&outFields={DISTRICT_FIELD}"
+    "&returnGeometry=false&f=geojson"
 )
 COUNCIL_LAYER_ID = "council_districts"
 # ---------------------------------------------------------------------------
@@ -279,8 +295,13 @@ assert len(COUNCIL_LINE_COLOR) == len(COUNCIL_FILL_COLOR) == 4, (
     "overlay colours must be full RGBA: deck.gl derives the attribute width "
     "from the first record and applies it to all of them"
 )
-DISTRICT_ON = "Yes"
-DISTRICT_OFF = "No"
+# The district menu's caption.  It replaces the old Yes/No switch, whose labels
+# were the two values of a selectbox; here the widget's values are the district
+# numbers themselves, so nothing else needs a name of its own.
+DISTRICT_SELECTOR_LABEL = "Dallas Council Districts"
+# With no choice made the menu reads as an empty box, which does not say "the map
+# has no overlay".  This caption is what makes the empty state legible.
+DISTRICT_NONE_HINT = "No districts selected -- no boundaries on the map."
 
 
 # ---------------------------------------------------------------------------
@@ -591,6 +612,53 @@ def council_district_records(features: list[dict[str, Any]]) -> list[dict[str, A
             record["__rings"] = rings
             records.append(record)
     return records
+
+
+def council_district_options(features: list[dict[str, Any]]) -> list[str]:
+    """The district numbers the menu offers, as strings, lowest first.
+
+    Read from the layer rather than typed in, so the menu cannot offer a district
+    the service no longer has or omit one it added.  `to_float` sorts them as
+    numbers -- `sorted()` on the raw strings would put 10, 11, 12 between 1 and 2.
+
+    A feature whose district is missing or non-numeric contributes no option: an
+    empty choice would render a selectable nothing, and filtering on it could never
+    match a record.  The values are the layer's own, never re-formatted, so whatever
+    the service calls a district is exactly what the filter matches on.
+    """
+    seen = set()
+    for feature in features:
+        value = (feature.get("properties") or {}).get(DISTRICT_FIELD)
+        if value is None or str(value).strip() == "":
+            continue
+        if to_float(value) is None:
+            continue
+        seen.add(str(value))
+    return sorted(seen, key=lambda v: (to_float(v), v))
+
+
+def filter_district_records(
+    records: list[dict[str, Any]], selected: list[str]
+) -> list[dict[str, Any]]:
+    """Only the records for chosen districts, in the layer's own order.
+
+    Matching is exact against `DISTRICT_FIELD`, because that is the same value
+    `council_district_options` listed: the menu hands back what it was given, so no
+    normalisation is needed and none is attempted -- a leading-zero or whitespace
+    variant would simply fail to match rather than be guessed at.
+
+    A MultiPolygon that split into several records keeps all of them, so selecting
+    one district can legitimately yield more than one record.  An empty or all-blank
+    `selected` yields nothing, which is the map's "no overlay" state.
+    """
+    chosen = {str(s) for s in selected if str(s).strip() != ""}
+    if not chosen:
+        return []
+    return [
+        record
+        for record in records
+        if str(record.get(DISTRICT_FIELD) or "").strip() in chosen
+    ]
 
 
 def fraction_flags(rows: list[dict[str, str]], fields: list[str]) -> dict[str, bool]:
@@ -937,13 +1005,12 @@ def main() -> None:
             index=CHOROPLETH_FIELDS.index(DEFAULT_CHOROPLETH),
         )
         field = next(f for f in CHOROPLETH_FIELDS if labels[f] == chosen)
-        # prompt.md:155-156 -- the overlay switch is a drop-down with this exact
-        # title, defaulting to "Yes".
-        show_districts = st.selectbox(
-            "Show Dallas Council Districts?",
-            [DISTRICT_ON, DISTRICT_OFF],
-            index=0,
-        )
+        # The district menu is NOT created here.  st.sidebar elements are laid out
+        # in call order, so it is added below -- after the precinct layer is known
+        # good -- and still lands directly beneath this selectbox.  It has to be
+        # created there because its options come from the council service, and
+        # building it up here would put a council request on the offline path,
+        # which must stay a single st.error with no second failure behind it.
         # st.caption(
         #     f"Hover a precinct for all {len(TOOLTIP_FIELDS)} metrics; "
         #     "click one for its "
@@ -969,15 +1036,54 @@ def main() -> None:
         )
         return
 
-    # Fetched only when the overlay is on, and only after the precinct layer is
-    # known good, so the offline path above stays a single st.error with no
-    # second failure.  A council-endpoint problem degrades to one warning and a
-    # precinct-only map: it never replaces the precinct error path.
-    district_records = None
-    if show_districts == DISTRICT_ON:
+    # Reopening the sidebar rather than building the menu in the block above:
+    # Streamlit collects sidebar elements in call order, so this still lands
+    # directly beneath "Colour precincts by", but the district option request now
+    # sits on this side of the precinct-layer guard.  On the offline path the
+    # function has already returned, so a dead precinct service still means zero
+    # council requests of any size -- not even the cheap one.
+    #
+    # The option list comes from COUNCIL_OPTIONS_URL (attributes only) rather than
+    # from the boundary geometry the menu is about, so a page load that draws no
+    # districts does not download 860 KB to find out which districts exist.  If that
+    # listing fails, the menu is left empty WITH a warning naming the URL it tried:
+    # a silently empty menu would read as "this county has no council districts".
+    with st.sidebar:
+        district_options: list[str] = []
         try:
-            district_records = council_district_records(
-                _cached_council_features()["features"]
+            district_options = council_district_options(
+                _cached_district_options()["features"]
+            )
+        except Exception as exc:
+            st.warning(
+                f"Could not list the Dallas Council Districts from "
+                f"{COUNCIL_OPTIONS_URL} ({type(exc).__name__}: {exc}).  The district "
+                "menu is empty, so no boundaries can be drawn."
+            )
+        chosen_districts = st.multiselect(
+            DISTRICT_SELECTOR_LABEL, options=district_options, default=[]
+        )
+        # Only worth saying when a choice was actually available to make; when the
+        # listing failed there is already a warning explaining the empty menu.
+        if district_options and not chosen_districts:
+            st.caption(DISTRICT_NONE_HINT)
+
+    # Boundaries are fetched only for districts actually selected.  At the empty
+    # default -- and whenever the option listing failed, since then nothing could
+    # have been chosen -- no geometry request goes out at all, which is the same
+    # guarantee the old Yes/No switch gave for "No".
+    #
+    # A council-endpoint problem degrades to one warning and a precinct-only map:
+    # it never replaces the precinct error path.  No warning is added for a
+    # selection that yields zero drawable records: the option list and the records
+    # come from the same 14 single-ring polygons, so the state has no evidence of
+    # being reachable (same reasoning that retired it from the overlay plan).
+    district_records = None
+    if chosen_districts:
+        try:
+            district_records = filter_district_records(
+                council_district_records(_cached_council_features()["features"]),
+                chosen_districts,
             )
         except Exception as exc:
             st.warning(
@@ -1043,6 +1149,13 @@ _cached_features = st.cache_data(ttl=CACHE_TTL)(fetch_features)
 # moves, and a rerun that only changes the colour field must not refetch it.
 _cached_council_features = st.cache_data(ttl=CACHE_TTL)(
     lambda: fetch_features(COUNCIL_LAYER_URL)
+)
+# The district *names* only, so the menu can be built without the geometry. Under
+# 1 KB against the boundary payload's ~860 KB, and cached for the same reason as
+# the two above: a rerun that changes only the colour field or the selection must
+# not ask the service what districts exist.
+_cached_district_options = st.cache_data(ttl=CACHE_TTL)(
+    lambda: fetch_features(COUNCIL_OPTIONS_URL)
 )
 
 # `streamlit run dashboard.py` executes this file as __main__; a bare `import

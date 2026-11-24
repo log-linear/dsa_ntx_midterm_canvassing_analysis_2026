@@ -1736,6 +1736,7 @@ from streamlit.proto.Block_pb2 import Block as BlockProto  # noqa: E402
 MAIN_SCRIPT = "import dashboard\ndashboard.main()\n"
 ORIG_CACHED = dashboard._cached_features
 ORIG_COUNCIL = dashboard._cached_council_features
+ORIG_OPTIONS = dashboard._cached_district_options
 ORIG_PYDECK_CHART = dashboard.st.pydeck_chart
 
 
@@ -1760,12 +1761,17 @@ def run_app(fc=None, selected=None, timeout=120):
     dashboard._cached_features = (
         (lambda *a, **k: fc) if fc is not None else ORIG_CACHED
     )
-    # The overlay defaults to "Yes", so every render from here on reaches for
-    # council geometry.  Hand it the 14 features already fetched at :496 instead
-    # of a second live request: these checks are about the precinct layer, the
-    # legend and the click, and an upstream outage would otherwise show up as an
-    # unrelated network hang inside a pre-existing assertion.
+    # The district menu is built on every render, so stub BOTH council fetches with
+    # the 14 features already fetched at :496 rather than going live again: these
+    # checks are about the precinct layer, the legend and the click, and an upstream
+    # outage would otherwise show up as an unrelated network hang inside a
+    # pre-existing assertion.  `council_district_options` reads only properties, so
+    # the geometry payload serves for both.
+    #
+    # Note the geometry stub is now a belt-and-braces one: the menu defaults to an
+    # empty selection, so an unmodified run_app render never asks for boundaries.
     dashboard._cached_council_features = lambda *a, **k: {"features": council}
+    dashboard._cached_district_options = lambda *a, **k: {"features": council}
     if selected is not None:
         # A real PydeckState from Streamlit's own types, standing in for the
         # chart's return value, so main() runs its actual selected_props(chart)
@@ -1779,6 +1785,7 @@ def run_app(fc=None, selected=None, timeout=120):
     finally:
         dashboard._cached_features = ORIG_CACHED
         dashboard._cached_council_features = ORIG_COUNCIL
+        dashboard._cached_district_options = ORIG_OPTIONS
         dashboard.st.pydeck_chart = ORIG_PYDECK_CHART
     assert not at.exception, f"app raised {at.exception[0].value if at.exception else ''}"
     return at
@@ -1936,30 +1943,49 @@ assert _populate_panel == panel, (_populate_panel, panel)
 ok("AC4: detail_panel_fields is still 17 over 820 rows, NO_DATA_FIELDS still 9",
    f"{len(rows)} rows")
 
-# --- the overlay drop-down, on the rendered sidebar -----------------------
-# prompt.md:155-156 asks for a drop-down with this exact title defaulting to
-# "Yes", and the plan puts it directly beneath the colour selectbox.  Asserted on
-# the emitted widgets, so a selectbox nobody rendered cannot pass.
-assert [b.label for b in at.selectbox] == [
-    "Colour precincts by", "Show Dallas Council Districts?"
-], [b.label for b in at.selectbox]
-toggle = at.selectbox[1]
-assert toggle.label == "Show Dallas Council Districts?", toggle.label
-assert list(toggle.options) == [dashboard.DISTRICT_ON, dashboard.DISTRICT_OFF], toggle.options
-assert toggle.options[0] == "Yes" and toggle.options[1] == "No", toggle.options
-assert toggle.value == "Yes", toggle.value
-assert at.sidebar.selectbox[-1] is toggle, "the toggle is not in the sidebar"
-ok('sidebar renders "Show Dallas Council Districts?" defaulting to "Yes"')
+# --- the district multi-select, on the rendered sidebar -------------------
+# Replaces the old "Show Dallas Council Districts?" Yes/No drop-down.  The title
+# lost its question mark because it is no longer a yes/no question, and the
+# options are the district numbers themselves.  Asserted on the emitted widgets,
+# so a multiselect nobody rendered cannot pass.
+assert [b.label for b in at.selectbox] == ["Colour precincts by"], [
+    b.label for b in at.selectbox
+]
+menu = at.multiselect[0]
+assert menu.label == dashboard.DISTRICT_SELECTOR_LABEL, menu.label
+# The option list is read off the layer (`council`, fetched at :722), not typed
+# in, and arrives NUMERICALLY sorted: 1..14, never the 1,10,11,12,13,14,2 order a
+# plain sort of the strings would give.
+assert list(menu.options) == [str(n) for n in range(1, 15)], list(menu.options)
+# The requested default: nothing selected, so no boundaries on the map.
+assert list(menu.value) == [], menu.value
+assert at.sidebar.multiselect[-1] is menu, "the menu is not in the sidebar"
+assert at.sidebar.selectbox[0] is at.selectbox[0], "the colour selectbox moved"
+ok('sidebar renders the district multi-select with all 14 districts, none chosen')
+# The empty box says nothing on its own, so the empty state is spelled out.
+assert any(dashboard.DISTRICT_NONE_HINT in c.value for c in at.sidebar.caption), [
+    c.value for c in at.sidebar.caption
+]
+ok('empty selection renders the "no boundaries" hint')
 
 # --- the deck handed to st.pydeck_chart, spied at the call site ------------
 # AppTest gives us the widget tree but not the Deck object, so spy on the chart
 # call itself: `hasattr`-style guards on main() would pass against a map that
 # never reached the render stream.
 council_calls = []
+options_calls = []
 
 
-def _spy(payload=None):
-    """Patch the fetch + the chart; return the list the spy appended decks to."""
+def _spy(payload=None, options_payload=None):
+    """Patch the fetches + the chart; return the list the spy appended decks to.
+
+    `payload` drives the BOUNDARY fetch (the 860 KB one, counted in
+    `council_calls`); `options_payload` drives the menu listing (counted in
+    `options_calls`).  They are counted apart because the contract this block
+    proves is specifically that an empty selection costs zero BOUNDARY requests --
+    the menu itself legitimately lists every time, and a single shared counter
+    would make that unprovable.
+    """
     seen = []
 
     # Named `council_fetch`, not `council`: this helper must not bind the name
@@ -1972,7 +1998,15 @@ def _spy(payload=None):
             raise payload
         return payload if payload is not None else {"features": council}
 
+    def options_fetch(*_a, **_k):
+        options_calls.append(1)
+        if options_payload is not None and not isinstance(options_payload, dict):
+            raise options_payload
+        # The menu reads only `properties`, so the geometry payload stands in.
+        return options_payload if options_payload is not None else {"features": council}
+
     dashboard._cached_council_features = council_fetch
+    dashboard._cached_district_options = options_fetch
 
     def chart(deck_arg, *_a, **_k):
         seen.append(deck_arg)
@@ -1993,13 +2027,40 @@ def _render(timeout=120):
 try:
     dashboard._cached_features = lambda *_a, **_k: stub_fc(["1045", "1046"])
     seen = _spy()
-    at_on = _render()
+    # At the DEFAULT (nothing selected) the deck must carry the precinct layer
+    # ONLY, and no boundary request may go out -- the call count is the proof, a
+    # fetch-and-discard would leave it incremented.  The menu still lists, which
+    # is what options_calls records.
+    at_off = _render()
     assert len(seen) == 1, f"expected one chart call, got {len(seen)}"
-    on_layers = json.loads(seen[0].to_json())["layers"]
-    assert [la["id"] for la in on_layers] == [dashboard.LAYER_ID, dashboard.COUNCIL_LAYER_ID], (
-        [la["id"] for la in on_layers]
+    off_layers = json.loads(seen[0].to_json())["layers"]
+    assert [la["id"] for la in off_layers] == [dashboard.LAYER_ID], [
+        la["id"] for la in off_layers
+    ]
+    assert len(off_layers) == 1, len(off_layers)
+    assert council_calls == [], (
+        f"{len(council_calls)} boundary requests at the empty default"
     )
-    assert len(on_layers[1]["data"]) == 14, len(on_layers[1]["data"])
+    assert len(options_calls) == 1, options_calls
+    assert not at_off.warning, [w.value for w in at_off.warning]
+    ok('default (no districts chosen) => precinct-only deck, zero boundary requests',
+       f"{len(council_calls)} boundary / {len(options_calls)} listing calls")
+
+    # Select three districts, deliberately out of order and including a 2-digit
+    # one, so the payload proves real filtering rather than "the whole layer".
+    before_council = len(council_calls)
+    at_off.multiselect[0].set_value(["1", "8", "12"])
+    at_off.run()
+    on_layers = json.loads(seen[-1].to_json())["layers"]
+    assert [la["id"] for la in on_layers] == [
+        dashboard.LAYER_ID, dashboard.COUNCIL_LAYER_ID
+    ], [la["id"] for la in on_layers]
+    assert len(on_layers[1]["data"]) == 3, len(on_layers[1]["data"])
+    # key=int: sorted() on the raw strings would order these 1,12,8, which is the
+    # very bug `council_district_options` avoids for the menu.  Here the assertion
+    # is about WHICH records survived the filter, so it sorts numerically.
+    got = sorted((r[dashboard.DISTRICT_FIELD] for r in on_layers[1]["data"]), key=int)
+    assert got == ["1", "8", "12"], got
     # AC4/AC3 at the render boundary: the props that keep the overlay from
     # stealing a precinct pick or a hover have to hold on the deck actually
     # handed to st.pydeck_chart, not only on one built directly in-process.
@@ -2017,44 +2078,70 @@ try:
     )
     assert "tooltip" not in on_layers[1], "a layer tooltip serialises and is never read"
     assert on_layers[0]["pickable"] is True, "the precinct layer lost its pickability"
-    assert len(council_calls) == 1, council_calls
-    assert not at_on.warning, [w.value for w in at_on.warning]
+    assert len(council_calls) == before_council + 1, council_calls
+    assert not at_off.warning, [w.value for w in at_off.warning]
+    # The hint is gone once a choice exists.
+    assert not any(
+        dashboard.DISTRICT_NONE_HINT in c.value for c in at_off.sidebar.caption
+    ), "the no-boundaries hint survived a non-empty selection"
+    ok('three districts selected => exactly those 3 records, overlay props intact')
     # 16 hover lines, one per tooltip field plus the precinct id.
-    assert _get_pydeck_tooltip(seen[0])["text"].count("\n") == len(
+    assert _get_pydeck_tooltip(seen[-1])["text"].count("\n") == len(
         dashboard.TOOLTIP_FIELDS
     )
 
-    # Toggle to "No": precinct layer only, and NO council request at all.  The
-    # call count is the proof -- a fetch-and-discard would leave it incremented.
-    before = len(council_calls)
-    at_on.selectbox[1].set_value("No")
-    at_on.run()
-    off_layers = json.loads(seen[-1].to_json())["layers"]
-    assert [la["id"] for la in off_layers] == [dashboard.LAYER_ID], [
-        la["id"] for la in off_layers
+    # Selecting ALL 14 reproduces the old whole-layer overlay.
+    at_off.multiselect[0].set_value([str(n) for n in range(1, 15)])
+    at_off.run()
+    all_layers = json.loads(seen[-1].to_json())["layers"]
+    assert len(all_layers[1]["data"]) == 14, len(all_layers[1]["data"])
+    ok('all 14 districts selected => full overlay, 14 records')
+
+    # Clearing the selection retracts the overlay AND stops asking for geometry.
+    before_council = len(council_calls)
+    at_off.multiselect[0].set_value([])
+    at_off.run()
+    cleared = json.loads(seen[-1].to_json())["layers"]
+    assert [la["id"] for la in cleared] == [dashboard.LAYER_ID], [
+        la["id"] for la in cleared
     ]
-    assert len(off_layers) == 1, len(off_layers)
-    assert len(council_calls) == before, (
-        f"the overlay was fetched anyway ({len(council_calls) - before} extra calls) "
+    assert len(council_calls) == before_council, (
+        f"boundary geometry fetched ({len(council_calls) - before_council}x) "
         "just to be thrown away"
     )
-    ok('toggle "No" => precinct-only deck and zero council requests',
-       f"{len(council_calls)} calls total")
-
-    # Back to "Yes" re-arms the overlay.
-    at_on.selectbox[1].set_value("Yes")
-    at_on.run()
-    assert len(json.loads(seen[-1].to_json())["layers"]) == 2
-    assert len(council_calls) == before + 1, council_calls
-    ok('toggle back to "Yes" restores the district layer')
+    ok('clearing the selection => precinct-only deck, zero new boundary requests',
+       f"{len(council_calls)} boundary calls total")
 
     # AC4: a click resolves identically with the overlay on.  The district layer
     # is not pickable, so it contributes no object to the selection and the
-    # detail panel is unchanged.
-    dashboard.st.pydeck_chart = lambda deck_arg, *_a, **_k: pydeck_state(
+    # detail panel is unchanged.  The selection is armed ON at_click, not on the
+    # object above: `_render` returns a FRESH AppTest, which starts at the empty
+    # default (widget state does not carry across AppTest instances), so setting it
+    # anywhere else would leave this render drawing no overlay at all and quietly
+    # test the wrong state.
+    # The stub has to do BOTH jobs: hand main() a real PydeckState AND keep
+    # recording decks into `seen`.  Returning the state alone silently stops the
+    # spy appending, and `seen[-1]` then reads as whatever the PREVIOUS run
+    # rendered -- here the cleared, precinct-only deck, which made this look like
+    # the overlay had stopped drawing at all.
+    click_state = pydeck_state(
         {dashboard.LAYER_ID: [{dashboard.JOIN_LAYER_KEY: "1045"}]}
     )
+
+    def _click_chart(deck_arg, *_a, **_k):
+        seen.append(deck_arg)
+        return click_state
+
+    dashboard.st.pydeck_chart = _click_chart
     at_click = _render()
+    before_click = len(council_calls)
+    at_click.multiselect[0].set_value(["1", "2"])
+    at_click.run()
+    click_layers = json.loads(seen[-1].to_json())["layers"]
+    assert [la["id"] for la in click_layers] == [
+        dashboard.LAYER_ID, dashboard.COUNCIL_LAYER_ID
+    ], [la["id"] for la in click_layers]
+    assert len(council_calls) == before_click + 1, council_calls
     _click_tables = panel_tables(at_click)
     assert len(at_click.dataframe) == 2, "click with the overlay on rendered both detail panels"
     assert len(_click_tables[dashboard.DEMOGRAPHICS_PANEL_HEADING]) == len(panel), \
@@ -2065,47 +2152,94 @@ try:
     ok("click resolves the same two panels with the overlay on",
        f"{len(panel)} + {len(dashboard.RESULTS_PANEL_FIELDS)} metrics")
 
-    # Matrix row "Council endpoint down": one warning naming the URL, the
-    # precinct map still rendered, no traceback, and no st.error stealing the
-    # place of the existing precinct path.
+    # Matrix row "Council endpoint down".  Two states now, because the service is
+    # asked twice for two different things.
+    #
+    # (a) The BOUNDARY fetch fails while districts are selected: one warning naming
+    # the geometry URL, the precinct map still rendered, no traceback, and no
+    # st.error stealing the place of the existing precinct path.  The selection is
+    # armed by hand because the empty default never reaches that fetch at all --
+    # which is itself asserted first, as the absence of any warning.
     seen = _spy(OSError("council service down"))
     at_bad = _render()
+    # Nothing selected at the default, so the boundary endpoint is never asked --
+    # hence no warning at all, which is the whole point of gating the fetch.
+    assert not at_bad.warning, [w.value for w in at_bad.warning]
+    before_bad = len(seen)
+    at_bad.multiselect[0].set_value(["1"])
+    at_bad.run()
+    assert len(seen) == before_bad + 1, f"the map stopped rendering: {seen}"
     assert len(at_bad.warning) == 1, [w.value for w in at_bad.warning]
     assert dashboard.COUNCIL_LAYER_URL in at_bad.warning[0].value, at_bad.warning[0].value
     assert "CouncilBoundaries" in at_bad.warning[0].value, at_bad.warning[0].value
     assert not at_bad.error, [e.value for e in at_bad.error]
     assert not at_bad.exception
-    assert len(seen) == 1, f"the map stopped rendering: {len(seen)} chart calls"
-    bad_layers = json.loads(seen[0].to_json())["layers"]
+    bad_layers = json.loads(seen[-1].to_json())["layers"]
     assert [la["id"] for la in bad_layers] == [dashboard.LAYER_ID], bad_layers
     assert len(at_bad.html) == 1, "the legend vanished with the overlay"
-    ok("matrix: council fetch raises -> one warning naming its URL, map still renders")
+    ok("matrix: boundary fetch raises -> one warning naming its URL, map still renders")
+
+    # (b) Matrix row this change introduces: the menu LISTING fails, so there is
+    # nothing to choose.  The app must say so rather than render a silently empty
+    # menu (which would read as "this county has no council districts"), must still
+    # not ask for the 860 KB of geometry, and must keep the map.
+    # `council_calls` is the one list every `_spy` closure appends to, so it is
+    # compared as a delta from here, not against zero -- the runs above already
+    # put numbers in it.
+    seen = _spy(options_payload=OSError("listing service down"))
+    before_nolist = len(council_calls)
+    at_nolist = _render()
+    assert len(at_nolist.warning) == 1, [w.value for w in at_nolist.warning]
+    assert dashboard.COUNCIL_OPTIONS_URL in at_nolist.warning[0].value, (
+        at_nolist.warning[0].value
+    )
+    assert not at_nolist.error, [e.value for e in at_nolist.error]
+    assert not at_nolist.exception
+    assert list(at_nolist.multiselect[0].options) == [], at_nolist.multiselect[0].options
+    assert list(at_nolist.multiselect[0].value) == [], at_nolist.multiselect[0].value
+    assert len(council_calls) == before_nolist, (
+        f"{len(council_calls) - before_nolist} boundary requests behind an empty menu"
+    )
+    nolist_layers = json.loads(seen[-1].to_json())["layers"]
+    assert [la["id"] for la in nolist_layers] == [dashboard.LAYER_ID], nolist_layers
+    assert len(at_nolist.html) == 1, "the legend vanished with the menu"
+    ok("matrix: menu listing raises -> one warning naming its URL, no boundary request",
+       f"{len(council_calls) - before_nolist} new boundary calls")
 finally:
     dashboard._cached_features = ORIG_CACHED
     dashboard._cached_council_features = ORIG_COUNCIL
+    dashboard._cached_district_options = ORIG_OPTIONS
     dashboard.st.pydeck_chart = ORIG_PYDECK_CHART
 
 # The offline path must stay exactly one st.error, and must not reach for the
-# council layer at all -- the district fetch sits after that early return.
+# council layer at all -- BOTH council fetches sit after that early return, the
+# boundary geometry one and, since the district menu moved here, the cheap menu
+# listing too.  Counting them apart so a regression in either one is named.
 _offline_calls = []
+_offline_option_calls = []
 def _precinct_layer_down(*_a, **_k):
     raise OSError("network down")
 
 
 dashboard._cached_features = _precinct_layer_down
 dashboard._cached_council_features = lambda *_a, **_k: _offline_calls.append(1)
+dashboard._cached_district_options = lambda *_a, **_k: _offline_option_calls.append(1)
 dashboard.st.pydeck_chart = lambda *_a, **_k: None
 try:
-    at_off = _render(timeout=60)
+    at_offline = _render(timeout=60)
 finally:
     dashboard._cached_features = ORIG_CACHED
     dashboard._cached_council_features = ORIG_COUNCIL
+    dashboard._cached_district_options = ORIG_OPTIONS
     dashboard.st.pydeck_chart = ORIG_PYDECK_CHART
-assert len(at_off.error) == 1, f"expected one clear error, got {len(at_off.error)}"
-assert dashboard.LAYER_URL in at_off.error[0].value
-assert not at_off.warning, [w.value for w in at_off.warning]
+assert len(at_offline.error) == 1, f"expected one clear error, got {len(at_offline.error)}"
+assert dashboard.LAYER_URL in at_offline.error[0].value
+assert not at_offline.warning, [w.value for w in at_offline.warning]
 assert _offline_calls == [], "the precinct layer being down must not fetch council geometry"
-ok("offline path unchanged: one st.error, no warning, no council request")
+assert _offline_option_calls == [], (
+    "the precinct layer being down must not fetch the council district list either"
+)
+ok("offline path unchanged: one st.error, no warning, no council request of any size")
 
 # ===========================================================================
 # The two detail panels -- side by side, on the rendered tree
@@ -2253,6 +2387,10 @@ try:
     # the deck recorder.  `_render` leaves the chart alone, so the spy survives.
     dashboard._cached_features = lambda *a, **k: stub_fc(["1045"])
     dashboard._cached_council_features = lambda *a, **k: {"features": []}
+    # The menu lists on every render regardless of selection, so it needs stubbing
+    # too -- otherwise this block reaches the live service for something it is not
+    # testing, and an outage lands inside an unrelated tooltip assertion.
+    dashboard._cached_district_options = lambda *a, **k: {"features": council}
     dashboard.st.pydeck_chart = _spy_chart
     _split = _render(timeout=120)
     _split_tables = panel_tables(_split)
@@ -2284,6 +2422,7 @@ finally:
     dashboard.st.pydeck_chart = ORIG_PYDECK_CHART
     dashboard._cached_features = ORIG_CACHED
     dashboard._cached_council_features = ORIG_COUNCIL
+    dashboard._cached_district_options = ORIG_OPTIONS
 
 # The restore is real, not assumed: re-render and require the original lists back.
 _restored = run_app(fc=stub_fc(["1045"]), selected={dashboard.JOIN_LAYER_KEY: "1045"})
