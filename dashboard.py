@@ -302,6 +302,7 @@ DISTRICT_SELECTOR_LABEL = "Dallas Council Districts"
 # With no choice made the menu reads as an empty box, which does not say "the map
 # has no overlay".  This caption is what makes the empty state legible.
 DISTRICT_NONE_HINT = "No districts selected -- no boundaries on the map."
+DEFAULT_DISTRICT_SELECTION = ["1", "2", "5", "9"]
 
 
 # ---------------------------------------------------------------------------
@@ -1061,7 +1062,7 @@ def main() -> None:
                 "menu is empty, so no boundaries can be drawn."
             )
         chosen_districts = st.multiselect(
-            DISTRICT_SELECTOR_LABEL, options=district_options, default=[]
+            DISTRICT_SELECTOR_LABEL, options=district_options, default=DEFAULT_DISTRICT_SELECTION
         )
         # Only worth saying when a choice was actually available to make; when the
         # listing failed there is already a warning explaining the empty menu.
