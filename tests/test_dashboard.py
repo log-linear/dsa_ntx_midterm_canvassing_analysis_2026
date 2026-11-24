@@ -357,6 +357,78 @@ assert dashboard.NO_DATA_COLOR == [0, 0, 0, 0], dashboard.NO_DATA_COLOR
 ok("no-data precincts stay fully empty regardless of FILL_ALPHA: no fill, no border")
 assert dashboard.color_scale(None, domain) == [0, 0, 0, 0], "no-data must not inherit FILL_ALPHA"
 
+# --- the transparency slider's alpha --------------------------------------
+# The sidebar now sets this per render, so FILL_ALPHA is the DEFAULT rather than
+# the only source.  Two things have to survive that: alpha is still appended
+# outside the ramp (never interpolated, so no ragged RGB/RGBA mix), and no-data
+# still short-circuits to [0,0,0,0] whatever the slider says -- otherwise a
+# precinct nobody canvassed would fade in and read as data.
+for _a in (0, 1, 128, dashboard.FILL_ALPHA, 254, 255):
+    _c = dashboard.color_scale(0.5, domain, _a)
+    assert len(_c) == 4 and _c[3] == _a, (_a, _c)
+    assert _c[:3] == dashboard.color_scale(0.5, domain)[:3], (
+        f"alpha {_a} changed the HUE, not just the opacity: {_c}"
+    )
+    assert dashboard.color_scale(None, domain, _a) == [0, 0, 0, 0], _a
+assert dashboard.color_scale(0.5, domain) == dashboard.color_scale(0.5, domain, dashboard.FILL_ALPHA)
+ok("explicit alpha lands on the fill alone; hue and no-data untouched", "0-255")
+
+# The slider carries TRANSPARENCY while the fills carry alpha, and the two run in
+# opposite directions.  Asserted on both ends, because an inversion slip in the
+# MIDDLE still reads plausibly: t=0 must be solid (255) and t=1 must paint nothing
+# (0).  Getting these backwards would make the left of the slider the transparent
+# end while every mid-range value still looked right.
+assert dashboard.alpha_for_transparency(0.0) == 255, dashboard.alpha_for_transparency(0.0)
+assert dashboard.alpha_for_transparency(1.0) == 0, dashboard.alpha_for_transparency(1.0)
+assert dashboard.alpha_for_transparency(0.5) == 128, dashboard.alpha_for_transparency(0.5)
+# More than 255 alpha is meaningless to deck.gl, and below 0 likewise.
+assert dashboard.alpha_for_transparency(-2.0) == 255, "must clamp, not overflow"
+assert dashboard.alpha_for_transparency(4.0) == 0, "must clamp, not go negative"
+ok("alpha_for_transparency inverts and clamps: 0->255, 1->0", "endpoints + out-of-range")
+
+# Every one of the 256 alpha values has to be REACHABLE from the slider's own grid,
+# and the ladder must be monotonic.  That is what TRANSPARENCY_STEP buys: st.slider's
+# float default step is 0.01 -- 101 positions, 101 alphas, and FILL_ALPHA is not one
+# of them, so the page would open on a value the slider can never return and every
+# move would quantise opacity in jumps of ~2.5 alpha levels.  Position n carries
+# alpha 255-n exactly.
+assert dashboard.TRANSPARENCY_STEP == 1 / 255, dashboard.TRANSPARENCY_STEP
+# Checked as equality with the grid position, never as `% step == 0.0`: float
+# division leaves a ~1e-17 residue on an EXACT hit, so a modulo test fails for a
+# reason that has nothing to do with the widget.
+assert dashboard.default_transparency() == (
+    (255 - dashboard.FILL_ALPHA) * dashboard.TRANSPARENCY_STEP
+), "the default is off the step grid, so the slider cannot reproduce it"
+_ladder = [dashboard.alpha_for_transparency(i / 255) for i in range(256)]
+assert set(_ladder) == set(range(256)), (
+    f"only {len(set(_ladder))} of 256 alphas reachable from the slider"
+)
+assert _ladder == sorted(_ladder, reverse=True), "transparency must fall as alpha rises"
+# The default must open on EXACTLY FILL_ALPHA, not on a rounded percentage of it:
+# derived, so editing FILL_ALPHA moves the slider with it instead of drifting.
+assert dashboard.alpha_for_transparency(dashboard.default_transparency()) == dashboard.FILL_ALPHA, (
+    dashboard.default_transparency(), dashboard.FILL_ALPHA
+)
+ok("all 256 alphas reachable and monotonic; default lands on FILL_ALPHA exactly",
+   f"default t={dashboard.default_transparency():.4f} -> {dashboard.FILL_ALPHA}")
+
+# The slider's own range must be the fraction space `format="percent"` renders --
+# a 0-255 range with that format would display "20000%".  The hint has to state
+# the 100% end, because at 100% the choropleth draws nothing at all and that would
+# otherwise read as a broken map.
+assert (dashboard.TRANSPARENCY_MIN, dashboard.TRANSPARENCY_MAX) == (0.0, 1.0), (
+    dashboard.TRANSPARENCY_MIN, dashboard.TRANSPARENCY_MAX
+)
+assert dashboard.TRANSPARENCY_MIN <= dashboard.default_transparency() <= dashboard.TRANSPARENCY_MAX
+assert dashboard.TRANSPARENCY_SLIDER_LABEL.strip()
+assert "100%" in dashboard.TRANSPARENCY_HINT, dashboard.TRANSPARENCY_HINT
+# transparency_label() was the first attempt and is gone: st.slider takes no
+# format_func, so the fraction IS the label.  Left behind it would be a second
+# source of truth for the same conversion.
+assert not hasattr(dashboard, "transparency_label"), "transparency_label outlived format_func"
+ok("slider range is the 0-1 fraction space format='percent' expects",
+   f"{dashboard.TRANSPARENCY_SLIDER_LABEL!r}")
+
 # per-field normalization, never a fixed 0-1.  `2024_kamala` spanned 0.51-0.85
 # over the 85 canvassed rows; widening the universe put 481 precincts on the
 # field, and among them precincts 1301 and 1742 really recorded 0 and 1 votes --
@@ -580,6 +652,20 @@ for field in dashboard.CHOROPLETH_FIELDS:
         if valued:
             assert record["__color"][3] == dashboard.FILL_ALPHA, record["__color"]
 ok("per-record __color: painted where data exists, empty where not", str(populated))
+
+# `decorate` must actually FORWARD the slider's alpha to every painted record --
+# and still never to a no-data one.  Checked on the live 791-record build, because
+# the defect this guards is a call site that keeps the default: a legend that fades
+# while the polygons stay solid is exactly the "two surfaces disagree" failure.
+_faded = dashboard.decorate(features, rows, "2024_kamala", 90)
+for record in _faded:
+    assert record["__color"][3] == (0 if record["__color"] == dashboard.NO_DATA_COLOR else 90), (
+        record["__color"]
+    )
+assert [r["__color"][:3] for r in _faded] == [
+    r["__color"][:3] for r in dashboard.decorate(features, rows, "2024_kamala")
+], "alpha changed the hues"
+ok("decorate forwards alpha to painted fills only, leaving the ramp identical")
 distinct = {
     tuple(r["__color"])
     for r in dashboard.decorate(features, rows, "2024_kamala")
@@ -2205,6 +2291,113 @@ try:
     assert len(at_nolist.html) == 1, "the legend vanished with the menu"
     ok("matrix: menu listing raises -> one warning naming its URL, no boundary request",
        f"{len(council_calls) - before_nolist} new boundary calls")
+finally:
+    dashboard._cached_features = ORIG_CACHED
+    dashboard._cached_council_features = ORIG_COUNCIL
+    dashboard._cached_district_options = ORIG_OPTIONS
+    dashboard.st.pydeck_chart = ORIG_PYDECK_CHART
+
+# --- the transparency slider reaches the RENDERED payload ------------------
+# The rule this file exists to enforce: assert the payload and the channel, not
+# that a Python string was built.  Four defects shipped from checks that proved a
+# string existed while the browser never read it, so this drives the slider as a
+# widget and reads back (a) the deck handed to st.pydeck_chart and (b) the legend
+# block that actually arrived -- never `color_scale()`'s return value.
+# 4079 and 3032 both carry a value for the default metric, so their fills are
+# painted and the alpha channel is observable; an all-blank stub would let a
+# slider that recoloured nothing pass every assertion below.
+try:
+    dashboard._cached_features = lambda *_a, **_k: stub_fc(["4079", "3032"])
+    seen = _spy()
+    at_slide = _render()
+
+    widgets = at_slide.sidebar.slider
+    assert len(widgets) == 1, f"expected one sidebar slider, got {len(widgets)}"
+    slide = widgets[0]
+    assert slide.label == dashboard.TRANSPARENCY_SLIDER_LABEL, slide.label
+    assert (slide.min, slide.max) == (
+        dashboard.TRANSPARENCY_MIN, dashboard.TRANSPARENCY_MAX
+    ), (slide.min, slide.max)
+    assert slide.help == dashboard.TRANSPARENCY_HINT, slide.help
+    # Asserted on the SHIPPED proto, because this is the one widget parameter that
+    # cannot be checked from the pure layer: st.slider's float default step is 0.01,
+    # which is a legal-looking slider that quietly offers only 101 alphas and none
+    # of them FILL_ALPHA.  Dropping the argument changes nothing in dashboard.py's
+    # own constants, so only the emitted element can catch it.
+    assert slide.proto.data_type == 1, "transparency slider must be a float slider"
+    assert abs(slide.proto.step - dashboard.TRANSPARENCY_STEP) < 1e-12, slide.proto.step
+    assert slide.proto.format == "percent", slide.proto.format
+    ok("slider ships as float, step=1/255, format=percent", str(slide.proto.step))
+
+    def last_records():
+        return json.loads(seen[-1].to_json())["layers"][0]["data"]
+
+    def painted_alphas():
+        """Alpha of every DATA-BEARING fill in the last emitted deck.
+
+        Selected by `!= NO_DATA_COLOR` rather than by alpha, which is the whole
+        point: at transparency 100% a precinct with data is [68,1,84,0] -- still a
+        data-bearing fill, just an invisible one -- and only a precinct with no row
+        is the all-zero NO_DATA_COLOR.  Filtering on alpha>0 would make the empty
+        map indistinguishable from a map where the join broke.
+        """
+        return [
+            r["__color"][3] for r in last_records()
+            if r["__color"] != dashboard.NO_DATA_COLOR
+        ]
+
+    # Opening state: the widget's default round-trips to exactly FILL_ALPHA, and
+    # the deck it produced paints with it.  A default typed as a round percentage
+    # (0.22) would give 199 here and fail on the payload, not just in a comment.
+    assert dashboard.alpha_for_transparency(slide.value) == dashboard.FILL_ALPHA, slide.value
+    assert painted_alphas() and set(painted_alphas()) == {dashboard.FILL_ALPHA}, painted_alphas()
+    ok("slider opens at FILL_ALPHA and the emitted deck paints with it",
+       f"t={slide.value:.4f} -> {dashboard.FILL_ALPHA}")
+
+    # Fully transparent: every data-bearing fill drops to alpha 0.  It must NOT
+    # collapse into NO_DATA_COLOR -- the hue channels ride along, so the precinct
+    # stays a precinct-with-data that merely paints nothing, keeps its tooltip and
+    # stays pickable.  That distinction is what makes 100% honest rather than a lie.
+    at_slide.sidebar.slider[0].set_value(1.0)
+    at_slide.run()
+    assert set(painted_alphas()) == {0}, painted_alphas()
+    faded = last_records()
+    assert len(faded) == 2, len(faded)
+    assert all(r["__color"][:3] for r in faded if r["__color"] != dashboard.NO_DATA_COLOR), faded
+    assert all(r["__matched"] for r in faded), "transparency altered the join state"
+    ok("transparency 100% -> alpha 0 on the shipped fills, hues and join intact",
+       str([r["__color"] for r in faded]))
+
+    # Fully opaque, and the legend tracks the SAME value the polygons got.  The
+    # legend is asserted by equality with legend_html(domain, alpha) -- the exact
+    # block the app rendered -- so a legend still using FILL_ALPHA while the map
+    # went solid (the two-surfaces-disagree failure) cannot pass.
+    at_slide.sidebar.slider[0].set_value(0.0)
+    at_slide.run()
+    assert set(painted_alphas()) == {255}, painted_alphas()
+    opaque_domain = dashboard.field_domain(rows, dashboard.DEFAULT_CHOROPLETH)
+    assert len(at_slide.html) == 1, f"expected one legend block, got {len(at_slide.html)}"
+    assert at_slide.html[0].value == dashboard.legend_html(opaque_domain, 255), (
+        "the rendered legend did not follow the slider"
+    )
+    assert f", {255 / 255:.3f})" in at_slide.html[0].value, "opaque legend lost its alpha"
+    ok("transparency 0% -> alpha 255 on the map AND on the rendered legend")
+
+    # A mid-range value, checked against both channels at once: the point of the
+    # slider is that the map and its key always describe the same opacity.
+    at_slide.sidebar.slider[0].set_value(0.5)
+    at_slide.run()
+    assert set(painted_alphas()) == {128}, painted_alphas()
+    assert at_slide.html[0].value == dashboard.legend_html(opaque_domain, 128)
+    ok("mid-range slider keeps map and legend on one opacity", "alpha 128")
+
+    # The slider changes colour ONLY: the clicked precinct's panels must not be
+    # rebuilt from different data, and the field selector keeps its selection.
+    assert [t.value for t in at_slide.title] == [
+        dashboard.label_for(dictionary, dashboard.DEFAULT_CHOROPLETH)
+    ], at_slide.title
+    assert not at_slide.exception
+    ok("transparency is display-only: title, fields and panels unchanged")
 finally:
     dashboard._cached_features = ORIG_CACHED
     dashboard._cached_council_features = ORIG_COUNCIL

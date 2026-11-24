@@ -188,6 +188,69 @@ NO_DATA_COLOR = [0, 0, 0, 0]
 FILL_ALPHA = 200
 
 # ---------------------------------------------------------------------------
+# The sidebar's transparency slider.
+#
+# Its value is TRANSPARENCY (0.0-1.0), which is what the reader is choosing; the
+# alpha channel the fills actually carry runs the other way and comes out of
+# `alpha_for_transparency()`.  Displaying the slider's own number is the whole
+# reason the range is 0-1 and not 0-255: `st.slider` has NO `format_func`
+# argument (unlike selectbox/select_slider -- verified against Streamlit's own
+# signature), so passing one is a TypeError that kills the whole page render.
+# `format="percent"` is the only native way to show a percentage, and it
+# multiplies the value by 100, which only means anything if the value IS a
+# fraction.
+#
+# `step` is NOT optional.  st.slider's own float default is 0.01, which snaps the
+# browser to 101 positions -- only 101 alphas, (255-FILL_ALPHA)/255 not one of
+# them, so the page would open at a value the slider cannot return and every
+# later move would quantise the opacity by 2.5 alpha levels.  1/255 puts a grid
+# position on every alpha value in order: position n is exactly alpha 255-n, and
+# default_transparency() is position 55 -- on the grid, and reachable.
+#
+# The two ends:
+#   0%   (alpha 255) -> fully opaque, the poster-like map the old
+#          "set FILL_ALPHA to 255" note described.
+#   100% (alpha 0)   -> the choropleth paints nothing at all.  Reachable and
+#          honest rather than a bug: it is the same shape as NO_DATA_COLOR, a
+#          transparent fill on a layer that stays pickable because deck.gl's
+#          picking pass discards on the picking-validity flag, never on alpha.
+#          Hover, click and the two detail panels all keep working on a map that
+#          looks empty, which is what TRANSPARENCY_HINT has to say.
+# ---------------------------------------------------------------------------
+TRANSPARENCY_SLIDER_LABEL = "Choropleth transparency"
+TRANSPARENCY_MIN = 0.0
+TRANSPARENCY_MAX = 1.0
+# One alpha level per step, so the grid position n carries alpha 255-n exactly.
+TRANSPARENCY_STEP = 1 / 255
+TRANSPARENCY_HINT = (
+    "Higher lets the basemap show through the choropleth; at 100% the fills draw "
+    "nothing but precincts stay hoverable and clickable."
+)
+
+
+def alpha_for_transparency(transparency: float) -> int:
+    """The alpha channel a transparency fraction paints at.
+
+    The inverse of the slider's own value, because the two run in opposite
+    directions: 0% transparent is a solid 255, 100% transparent is nothing at
+    all.  Clamped first so a value outside 0-1 (unreachable from the slider, but
+    possible from a caller) yields the nearest end rather than an out-of-range
+    channel that deck.gl would have to make sense of.
+    """
+    t = max(TRANSPARENCY_MIN, min(TRANSPARENCY_MAX, transparency))
+    return round((1 - t) * 255)
+
+
+def default_transparency() -> float:
+    """The slider's opening position: the fraction FILL_ALPHA corresponds to.
+
+    Derived rather than typed so the map opens at exactly FILL_ALPHA.  Change
+    FILL_ALPHA and this follows; hard-coding 0.22 would open the page at alpha
+    199 and quietly redefine the default look of the map.
+    """
+    return (255 - FILL_ALPHA) / 255
+
+# ---------------------------------------------------------------------------
 # The ramp: viridis, matplotlib's default perceptually-uniform sequential
 # colormap, authored as plain RGB (viridis's own 9 control points).  See the
 # guard below.
@@ -442,19 +505,26 @@ def ramp_rgb(t: float) -> list[int]:
     return [round(a + (b - a) * local) for a, b in zip(c0, c1)]
 
 
-def color_scale(value: float | None, domain: tuple[float, float] | None) -> list[int]:
-    """The fill for one value: the ramp at `FILL_ALPHA`, or nothing at all.
+def color_scale(
+    value: float | None,
+    domain: tuple[float, float] | None,
+    alpha: int = FILL_ALPHA,
+) -> list[int]:
+    """The fill for one value: the ramp at `alpha`, or nothing at all.
 
     A real 0.0 with a populated domain lands on the scale minimum, not the empty
     style: blank and zero are different states, and only blank drops the fill.
     Alpha is appended rather than interpolated, so every painted fill shares one
-    opacity and one length -- change `FILL_ALPHA`, not these colours.
+    opacity and one length -- `alpha` is the only channel that varies, and it
+    comes in from the caller (the sidebar slider) or from `FILL_ALPHA` by default.
+    `alpha` is NOT clamped here: deck.gl takes 0-255 and the slider is the only
+    producer, so a caller passing something else is a bug worth seeing.
     """
     if value is None or domain is None:
         return list(NO_DATA_COLOR)
     lo, hi = domain
     t = 0.0 if hi == lo else (value - lo) / (hi - lo)
-    return ramp_rgb(t) + [FILL_ALPHA]
+    return ramp_rgb(t) + [alpha]
 
 
 def tooltip_template(
@@ -543,7 +613,10 @@ def field_domain(rows: list[dict[str, str]], field: str) -> tuple[float, float] 
 
 
 def decorate(
-    features: list[dict[str, Any]], rows: list[dict[str, str]], field: str
+    features: list[dict[str, Any]],
+    rows: list[dict[str, str]],
+    field: str,
+    alpha: int = FILL_ALPHA,
 ) -> list[dict[str, Any]]:
     """One pydeck record per polygon: layer attributes plus display values.
 
@@ -551,6 +624,11 @@ def decorate(
     bridge iterates `data` directly.  A polygon's rings ride along as
     `__rings`; colour, match state and the pre-formatted tooltip metrics are plain
     keys on the record, which is what the accessors below name.
+
+    `alpha` is the sidebar's transparency choice, handed straight to `color_scale`
+    for every polygon.  It cannot reach NO_DATA_COLOR, which short-circuits before
+    the ramp is consulted, so the slider changes how solid the data reads without
+    ever making an absent precinct look present or the reverse.
     """
     index = join_index(rows)
     domain = field_domain(rows, field)
@@ -567,7 +645,7 @@ def decorate(
         row = index.get(str(record.get(JOIN_LAYER_KEY, "")).strip())
         record["__rings"] = coordinates if geometry.get("type") == "Polygon" else []
         record["__color"] = color_scale(
-            None if row is None else to_float(row.get(field)), domain
+            None if row is None else to_float(row.get(field)), domain, alpha
         )
         record["__matched"] = row is not None
         # The `v_` keys are the tooltip's data, so they follow TOOLTIP_FIELDS --
@@ -704,7 +782,8 @@ def detail_records(
 # Colour legend -- pure string building, rendered by st.html under the map.
 #
 # The swatches come out of `color_scale`/`ramp_rgb`, so the legend cannot drift
-# from the map: change VIRIDIS_STOPS or FILL_ALPHA and the two move together.
+# from the map: change VIRIDIS_STOPS or hand it the slider's alpha and the two
+# move together.  `main` passes the same alpha to both, which is the guarantee.
 # ---------------------------------------------------------------------------
 LEGEND_BAR_WIDTH = 300  # px
 LEGEND_BAR_HEIGHT = 14  # px
@@ -733,7 +812,9 @@ def _css_rgba(color: list[int]) -> str:
     return f"rgba({red}, {green}, {blue}, {alpha / 255:.3f})"
 
 
-def legend_html(domain: tuple[float, float] | None) -> str:
+def legend_html(
+    domain: tuple[float, float] | None, alpha: int = FILL_ALPHA
+) -> str:
     """A gradient bar labelled with the selected field's own populated min/max.
 
     Both degenerate domains are handled: `None` when no precinct carries a value
@@ -743,6 +824,10 @@ def legend_html(domain: tuple[float, float] | None) -> str:
     precincts (all but those carrying a value), so a swatch that simply omitted
     its background would render as nothing at all and the legend would look
     broken.
+
+    `alpha` is the same value `decorate` was handed, so the bar shows the fill the
+    polygons actually carry.  Omit it and the legend falls back to FILL_ALPHA,
+    which is what the map shows before the slider has been touched.
     """
     row = "display:flex;align-items:center;gap:8px;"
     bar = f"width:{LEGEND_BAR_WIDTH}px;height:{LEGEND_BAR_HEIGHT}px;border-radius:3px;"
@@ -762,7 +847,7 @@ def legend_html(domain: tuple[float, float] | None) -> str:
         # `low` is the whole swatch when the field is single-valued; for a real
         # range the gradient below carries every stop, whose last entry is the
         # same colour `color_scale(hi, domain)` returns.
-        low = _css_rgba(color_scale(lo, domain))
+        low = _css_rgba(color_scale(lo, domain, alpha))
         if lo == hi:
             swatch = f'<div style="{bar}{edge}background:{low};"></div>'
         else:
@@ -771,7 +856,7 @@ def legend_html(domain: tuple[float, float] | None) -> str:
             # straight purple->yellow chord instead: a legend promising a
             # gradient no precinct is ever painted with.
             stops = ", ".join(
-                f"{_css_rgba(ramp_rgb(pos) + [FILL_ALPHA])} {pos * 100:.1f}%"
+                f"{_css_rgba(ramp_rgb(pos) + [alpha])} {pos * 100:.1f}%"
                 for pos, _ in VIRIDIS_STOPS
             )
             gradient = f"linear-gradient(90deg, {stops})"
@@ -1006,6 +1091,21 @@ def main() -> None:
             index=CHOROPLETH_FIELDS.index(DEFAULT_CHOROPLETH),
         )
         field = next(f for f in CHOROPLETH_FIELDS if labels[f] == chosen)
+        # No data changes here: the slider only recolours.  st.pydeck_chart is keyed
+        # on "precinct_map", so moving it keeps the clicked precinct selected.
+        # `format="percent"` is what shows "22%" -- st.slider has no format_func, so
+        # the value itself has to be the fraction.  The alpha channel is derived from
+        # it by alpha_for_transparency(), which opens at exactly FILL_ALPHA.
+        transparency = st.slider(
+            TRANSPARENCY_SLIDER_LABEL,
+            TRANSPARENCY_MIN,
+            TRANSPARENCY_MAX,
+            default_transparency(),
+            TRANSPARENCY_STEP,
+            format="percent",
+            help=TRANSPARENCY_HINT,
+        )
+        alpha = alpha_for_transparency(transparency)
         # The district menu is NOT created here.  st.sidebar elements are laid out
         # in call order, so it is added below -- after the precinct layer is known
         # good -- and still lands directly beneath this selectbox.  It has to be
@@ -1094,7 +1194,7 @@ def main() -> None:
             )
             district_records = None
 
-    fc = decorate(features, rows, field)
+    fc = decorate(features, rows, field, alpha)
     stats = join_precincts(features, rows)
     colored = sum(1 for record in fc if record["__color"] != NO_DATA_COLOR)
 
@@ -1108,7 +1208,7 @@ def main() -> None:
     )
 
     # Directly under the map, so the ramp and its range read as one unit.
-    st.html(legend_html(field_domain(rows, field)))
+    st.html(legend_html(field_domain(rows, field), alpha))
 
     # The [3, 2] split that used to hold the single detail panel is gone: the row of
     # two panels needs the full width, and `st.columns` nested inside another
