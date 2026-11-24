@@ -64,6 +64,8 @@ CHOROPLETH_FIELDS = [
     "prop_a_city_no_canvassing_pct",
     "canvass_attempts",
     "response_rate",
+    "pct_renter_occupied",
+    "pct_bachelors_plus",
     "2026_gov_percent_Hinojosa",
     "2026_sen_percent_Talarico",
     "2026_prop_city_percent_Against",
