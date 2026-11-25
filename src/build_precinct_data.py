@@ -101,124 +101,70 @@ import xml.etree.ElementTree as ET
 from collections import OrderedDict
 from pathlib import Path
 
-TABLE = "{urn:oasis:names:tc:opendocument:xmlns:table:1.0}"
-OFFICE = "{urn:oasis:names:tc:opendocument:xmlns:office:1.0}"
+import settings
 
-PRECINCT_COL = "dallas_county_precinct_number"
-GROUP_COL = "precinct_group"
-ALIGN_COL = "sheet_column_alignment"
 
-BASE = Path(__file__).resolve().parent
-DATA = BASE / "data"
-RAW = DATA / "raw"               # every input lives here; DATA holds only output
-ODS_FILES = sorted(RAW.glob("*.ods"))
-VTD_MAP = RAW / "dallas_vtd_to_county_precinct.csv"
-DFS_CSV = RAW / "dfs-export-precinct-20261108" / "data.csv"
-COMB_CSV = RAW / "precinct_comb.csv"  # county results roll-up, one row per (county, precinct)
-COMB_COUNTY = "Dallas"   # the only county whose rows this build joins
-COMB_COUNTY_COL = "county"
-COMB_KEY_COL = "precinct"
+# Every value this build reads as a constant is authored in `src/settings.py`:
+# the repo-root path anchors, the raw-input paths, the field names it writes, and
+# the tables driving header normalisation, shift detection and the roll-up
+# overlay.  Anchoring on `settings.REPO_ROOT` rather than this module's own
+# directory is what lets `uv run python src/build_precinct_data.py` still find `data/` at
+# the repo root instead of creating `src/data/`.
+#
+# These bindings are not a compatibility shim for callers: the module body refers
+# to these names throughout, and `main()` reads the path ones as module globals at
+# CALL time, which is a property the suite depends on -- it rebinds OUT / COMB_CSV
+# / GOV_CSV / SEN_CSV / PROPS_CSV to a temp or synthetic file and asserts the build
+# aborts with SystemExit BEFORE the writer opens.  The extract is written with "w"
+# with no dry-run, so "truncated output over committed data" is the exact failure
+# mode those checks guard, and it can only be guarded on a path read this late.
+#
+# ODS_FILES globs at settings-import time rather than at build time, exactly as it
+# globbed at this module's import time before the move: a missing .ods is still a
+# silent empty list, which is why AGENTS.md says to copy data/*.csv aside first.
+ODS_FILES = settings.ODS_FILES
+VTD_MAP = settings.VTD_MAP_CSV
+DFS_CSV = settings.DFS_EXPORT_CSV
+COMB_CSV = settings.COMB_ROLLUP_CSV
+COMB_COUNTY = settings.COMB_COUNTY
+COMB_COUNTY_COL = settings.COMB_COUNTY_COL
+COMB_KEY_COL = settings.COMB_KEY_COL
+COMB_OVERLAYS = settings.COMB_OVERLAYS
 
-# --- 2026 general election: three official per-precinct result files -------
-GOV_CSV = RAW / "2026_governor_general_precinct.csv"
-SEN_CSV = RAW / "2026_senate_general_precinct.csv"
-PROPS_CSV = RAW / "2026_props_general_precinct.csv"  # long format: one row per precinct per proposition
-GENERAL_KEY_COL = "new_precinct"        # `113:<dallas county precinct code>`
-GENERAL_KEY_PREFIXES = {"113"}          # Dallas; every key in all three files carries it
-GENERAL_REGISTERED_COL = "Registered"
-GENERAL_PROPS_COL = "Proposition"       # discriminator: `city` / `county`
-GENERAL_PROPS = ("city", "county")
+GOV_CSV = settings.GOV_CSV
+SEN_CSV = settings.SEN_CSV
+PROPS_CSV = settings.PROPS_CSV
+GENERAL_KEY_COL = settings.GENERAL_KEY_COL
+GENERAL_KEY_PREFIXES = settings.GENERAL_KEY_PREFIXES
+GENERAL_REGISTERED_COL = settings.GENERAL_REGISTERED_COL
+GENERAL_PROPS_COL = settings.GENERAL_PROPS_COL
+GENERAL_PROPS = settings.GENERAL_PROPS
+GOV_MEASURES = settings.GOV_MEASURES
+SEN_MEASURES = settings.SEN_MEASURES
+PROPS_MEASURES = settings.PROPS_MEASURES
+GENERAL_CONTESTS = settings.GENERAL_CONTESTS
+GENERAL_REGISTERED_OUT = settings.GENERAL_REGISTERED_OUT
+RETIRED_GENERAL_COLS = settings.RETIRED_GENERAL_COLS
 
-# Output names, namespaced by contest (decision 2a): `votes_Other` appears in
-# both race files and `votes_For` in both proposition rows, so no source name
-# can be carried verbatim.  `Registered` is carried once, from the governor
-# file, after asserting all four files agree on it for every matched precinct
-# (decision 2b).  A source column outside these maps aborts the build rather
-# than being promoted silently the way comb_columns() promotes one.
-GOV_MEASURES = {
-    "votes_Abbott": "2026_gov_votes_Abbott",
-    "votes_Hinojosa": "2026_gov_votes_Hinojosa",
-    "votes_Other": "2026_gov_votes_Other",
-    "percent_Abbott": "2026_gov_percent_Abbott",
-    "percent_Hinojosa": "2026_gov_percent_Hinojosa",
-    "percent_Other": "2026_gov_percent_Other",
-    "percent_Turnout": "2026_gov_percent_Turnout",
-}
-SEN_MEASURES = {
-    "votes_Paxton": "2026_sen_votes_Paxton",
-    "votes_Talarico": "2026_sen_votes_Talarico",
-    "votes_Other": "2026_sen_votes_Other",
-    "percent_Paxton": "2026_sen_percent_Paxton",
-    "percent_Talarico": "2026_sen_percent_Talarico",
-    "percent_Other": "2026_sen_percent_Other",
-    "percent_Turnout": "2026_sen_percent_Turnout",
-}
-PROPS_MEASURES = {
-    "city": {
-        "votes_For": "2026_prop_city_votes_For",
-        "votes_Against": "2026_prop_city_votes_Against",
-        "percent_For": "2026_prop_city_percent_For",
-        "percent_Against": "2026_prop_city_percent_Against",
-        "percent_Turnout": "2026_prop_city_percent_Turnout",
-    },
-    "county": {
-        "votes_For": "2026_prop_county_votes_For",
-        "votes_Against": "2026_prop_county_votes_Against",
-        "percent_For": "2026_prop_county_percent_For",
-        "percent_Against": "2026_prop_county_percent_Against",
-        "percent_Turnout": "2026_prop_county_percent_Turnout",
-    },
-}
-GENERAL_CONTESTS = [
-    ("gov", GOV_MEASURES),
-    ("sen", SEN_MEASURES),
-    ("city", PROPS_MEASURES["city"]),
-    ("county", PROPS_MEASURES["county"]),
-]
-GENERAL_REGISTERED_OUT = "2026_registered_general"
+# The output path: the same file as `settings.PRECINCT_CSV`, reached through the
+# name `main()` opens.
+OUT = settings.PRECINCT_CSV
 
-# Canvass-workbook placeholders the official results supersede (decision 3a).
-# They stay in the .ods union read, so fullness() and choose_shift() scoring is
-# byte-unchanged; only the writer excludes them (decision 3b).
-RETIRED_GENERAL_COLS = ("2026_turnout", "2026_bond", "2026_talarico", "2026_hinojosa")
+PRECINCT_COL = settings.PRECINCT_COL
+GROUP_COL = settings.GROUP_COL
+ALIGN_COL = settings.ALIGN_COL
+SHARE_COL = settings.SHARE_COL
+RESPONSE_COUNT_COL = settings.RESPONSE_COUNT_COL
+NO_PCT_COL = settings.NO_PCT_COL
+RENTER_COL = settings.RENTER_COL
+DEDUPE_SKIP = settings.DEDUPE_SKIP
 
-SHARE_COL = "share_of_county_precinct"  # crosswalk: how much of the precinct this VTD covers
-RESPONSE_COUNT_COL = "response_count"  # estimated households reached: round(canvass_attempts * response_rate)
-NO_PCT_COL = "prop_a_city_no_canvassing_pct"   # no-rate of responders: strong_no / response_count
-RENTER_COL = "pct_renter_occupied"  # complement of the DFS owner-occupied share
-OUT = DATA / "precinct_data.csv"
+TABLE = settings.TABLE
+OFFICE = settings.OFFICE
+HEADER_ALIASES = settings.HEADER_ALIASES
+EXPECTED_TYPE = settings.EXPECTED_TYPE
+MAX_SHIFT = settings.MAX_SHIFT
 
-# Sheets disagree on wording/case for the same metric.  UNION aligns columns by
-# name, so fold the known variants onto one canonical name.  "2028 Turnout" is a
-# typo in District 9 / "Apartment City": it sits in the same column position as
-# "2024 turnout" everywhere else, and there is no 2028 general election yet.
-HEADER_ALIASES = {"2028_turnout": "2024_turnout"}
-
-# Expected ODF value-type per metric column, used to detect shifted rows.
-# `strong_no` is deliberately absent: the sheets store both counts and
-# percentages in it, so its type carries no signal.
-EXPECTED_TYPE = {
-    "2024_prop_r_for": "percentage",
-    "2024_prop_u_against": "percentage",
-    "2024_kamala": "percentage",
-    "2024_turnout": "percentage",
-    "2026_registered": "float",
-    "canvass_attempts": "float",
-    "response_rate": "percentage",
-}
-MAX_SHIFT = 1  # the only observed mis-alignment is one column left
-
-# The roll-up's 20 measures, in source order.  Three of them arrive under an
-# existing field name instead of their own (decision 1a): the .ods canvass
-# workbooks used to supply these shares, and the official county result
-# supersedes them while the name, its label and the dashboard code naming it
-# all stay put.  A source column consumed this way is not also carried under
-# its own name, so 3 of the 20 fold in and 17 arrive as new columns.
-COMB_OVERLAYS = {
-    "2024_percent_Harris": "2024_kamala",
-    "2024_percent_For_R": "2024_prop_r_for",
-    "2024_percent_Against_U": "2024_prop_u_against",
-}
 
 
 
@@ -750,12 +696,6 @@ def fullness(rec: "dict[str, str]", columns: "list[str]", skip: "tuple[str, ...]
     return sum(1 for c in columns if c not in skip and rec.get(c, "") != "")
 
 
-# Columns the fullness score ignores: they are filled on every row (key,
-# provenance, grain, alignment audit), so counting them would make the winner
-# rule meaningless.  Shared by `dedupe_output_by_precinct()` and
-# `crosswalk_only_rows()` so the widening scores candidates by exactly the same
-# rule the fan-out dedupe uses -- one definition, not a copy that can drift.
-DEDUPE_SKIP = (PRECINCT_COL, GROUP_COL, "district", ALIGN_COL, "source_file")
 
 
 def row_rank(row: "dict[str, str]", counted: "list[str]") -> "tuple[int, float]":

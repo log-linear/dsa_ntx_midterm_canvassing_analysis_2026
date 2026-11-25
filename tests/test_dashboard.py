@@ -1,4 +1,4 @@
-"""Edge-case matrix checks for dashboard.py -- `uv run python tests/test_dashboard.py`.
+"""Edge-case matrix checks for src/dashboard.py -- `uv run python tests/test_dashboard.py`.
 
 Plain asserts, one pass line per check, exit 0 when all hold.  Run from the
 repo root.
@@ -13,9 +13,12 @@ import sys
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(BASE))
+sys.path.insert(0, str(BASE / "src"))
 
 import dashboard  # noqa: E402
+import settings  # noqa: E402
+from utils import data_layer  # noqa: E402
+from utils import streamlit as ui  # noqa: E402
 
 PASS = 0
 
@@ -60,10 +63,10 @@ def expect_raises(exc_type, fn, *args, **kwargs):
     raise AssertionError(f"expected {exc_type.__name__} and got none")
 
 
-rows = dashboard.load_rows()
-dictionary = dashboard.build_dictionary()
-index = dashboard.join_index(rows)
-labels = {f: dashboard.label_for(dictionary, f) for f in dashboard.DETAIL_FIELDS}
+rows = data_layer.load_rows()
+dictionary = data_layer.build_dictionary()
+index = data_layer.join_index(rows)
+labels = {f: data_layer.label_for(dictionary, f) for f in settings.DETAIL_FIELDS}
 
 # --- the two universes this change is about, read from data/raw/ ------------
 # Every count the plan's matrix moves is derived from these rather than typed
@@ -89,7 +92,7 @@ CROSSWALK_CODES = {r[CROSSWALK_ID_COL].strip() for r in crosswalk_rows} - {""}
 ODS_ROWS, ODS_COLS = bpd.read_ods_tables()
 CANVASSED_CODES = {r[bpd.PRECINCT_COL].strip() for r in ODS_ROWS} - {""}
 ADDED_CODES = sorted(CROSSWALK_CODES - CANVASSED_CODES)
-EXTRACT_CODES = {r[dashboard.JOIN_CSV_KEY].strip() for r in rows}
+EXTRACT_CODES = {r[settings.JOIN_CSV_KEY].strip() for r in rows}
 assert CANVASSED_CODES <= CROSSWALK_CODES, sorted(CANVASSED_CODES - CROSSWALK_CODES)
 assert CANVASSED_CODES <= EXTRACT_CODES, sorted(CANVASSED_CODES - EXTRACT_CODES)
 ok("universes read from data/raw/, not from the extract",
@@ -144,13 +147,13 @@ def raw_populated_codes(field, codes):
     """
     contest, source_col = FIELD_SOURCE[field]
     return [c for c in codes
-            if dashboard.to_float((general_source(contest, c) or {}).get(source_col)) is not None]
+            if data_layer.to_float((general_source(contest, c) or {}).get(source_col)) is not None]
 
 # --- dictionary coverage: every field the dashboard touches is documented ----
 all_needed = (
-    dashboard.CHOROPLETH_FIELDS + dashboard.TOOLTIP_FIELDS
-    + dashboard.DETAIL_FIELDS + dashboard.RESULTS_PANEL_FIELDS
-    + [dashboard.JOIN_CSV_KEY]
+    settings.CHOROPLETH_FIELDS + settings.TOOLTIP_FIELDS
+    + settings.DETAIL_FIELDS + settings.RESULTS_PANEL_FIELDS
+    + [settings.JOIN_CSV_KEY]
 )
 missing = [f for f in all_needed if f not in dictionary]
 assert not missing, f"undocumented fields: {missing}"
@@ -202,7 +205,7 @@ EXPECTED = {
     "pct_bachelors_plus": "Percent Bachelor's or Higher",
 }
 for field, want in EXPECTED.items():
-    got = dashboard.label_for(dictionary, field)
+    got = data_layer.label_for(dictionary, field)
     assert got == want, f"{field}: {got!r} != {want!r}"
 ok("label overrides match the human's worked examples", f"{len(EXPECTED)} checked")
 
@@ -216,44 +219,44 @@ CHOR_EXPECT = {
     "canvass_attempts": "Canvass Attempts",
 }
 for field, want in CHOR_EXPECT.items():
-    got = dashboard.label_for(dictionary, field)
+    got = data_layer.label_for(dictionary, field)
     assert got == want, f"choropleth label {field}: {got!r} != {want!r}"
 ok("every choropleth and tooltip label is the readable one")
 
 # --- blank vs zero ----------------------------------------------------------
-assert dashboard.to_float("") is None
-assert dashboard.to_float("   ") is None
-assert dashboard.to_float("0.0000") == 0.0
-assert dashboard.to_float(None) is None
+assert data_layer.to_float("") is None
+assert data_layer.to_float("   ") is None
+assert data_layer.to_float("0.0000") == 0.0
+assert data_layer.to_float(None) is None
 ok('blank "" is no data; "0.0000" is the real value 0.0')
 
-assert dashboard.format_value(None) == dashboard.NO_DATA_TEXT
-assert dashboard.format_value(0.0) == "0.0%"
-assert dashboard.format_value(None) != dashboard.format_value(0.0)
+assert data_layer.format_value(None) == settings.NO_DATA_TEXT
+assert data_layer.format_value(0.0) == "0.0%"
+assert data_layer.format_value(None) != data_layer.format_value(0.0)
 ok("blank and zero render differently")
 
 # Units come from the field's own range, never from the size of one value.
 # `canvass_attempts` is an integer 0-613; guessing per value rendered zero
 # attempts as "0.0%" and one attempt as "100.0%" while 113 stayed "113".
-attempts = dashboard.field_domain(rows, "canvass_attempts")
-assert attempts and not dashboard.domain_is_share(attempts), attempts
-assert dashboard.format_value(0.0, fraction=False) == "0"
-assert dashboard.format_value(1.0, fraction=False) == "1"
-assert dashboard.format_value(613.0, fraction=False) == "613"
-rates = dashboard.field_domain(rows, "response_rate")
-assert dashboard.domain_is_share(rates), rates
-assert dashboard.format_value(0.0) == dashboard.format_value(0.0, True)
+attempts = data_layer.field_domain(rows, "canvass_attempts")
+assert attempts and not data_layer.domain_is_share(attempts), attempts
+assert data_layer.format_value(0.0, fraction=False) == "0"
+assert data_layer.format_value(1.0, fraction=False) == "1"
+assert data_layer.format_value(613.0, fraction=False) == "613"
+rates = data_layer.field_domain(rows, "response_rate")
+assert data_layer.domain_is_share(rates), rates
+assert data_layer.format_value(0.0) == data_layer.format_value(0.0, True)
 ok("counts and shares told apart by the field's range, not per value")
 
 # a real 0.0 must take the scale minimum, not the empty no-data style
 zero_field = "prop_a_city_no_canvassing_pct"
-domain = dashboard.domain_for([dashboard.to_float(r.get(zero_field)) for r in rows])
+domain = data_layer.domain_for([data_layer.to_float(r.get(zero_field)) for r in rows])
 assert domain and domain[0] == 0.0, domain
-colored = dashboard.color_scale(0.0, domain)
-empty = dashboard.color_scale(None, domain)
-assert empty == dashboard.NO_DATA_COLOR == [0, 0, 0, 0], empty
+colored = data_layer.color_scale(0.0, domain)
+empty = data_layer.color_scale(None, domain)
+assert empty == settings.NO_DATA_COLOR == [0, 0, 0, 0], empty
 assert empty[3] == 0, "no-data fill must be transparent"
-assert colored != empty and colored[:3] == dashboard.COLOR_LOW, (colored, empty)
+assert colored != empty and colored[:3] == settings.COLOR_LOW, (colored, empty)
 assert len(colored) == len(empty) == 4, (colored, empty)
 assert is_painted(colored), f"a data-bearing fill went invisible: {colored}"
 ok("0.0000 colours at the scale minimum; blank is transparent", f"domain {domain}")
@@ -262,17 +265,17 @@ ok("0.0000 colours at the scale minimum; blank is transparent", f"domain {domain
 # nothing else can override it.  Under 255 by design, so the basemap stays
 # legible beneath the choropleth -- set it to 255 (and update this check) only if
 # a solid map is deliberately wanted.
-assert 0 < dashboard.FILL_ALPHA < 255, dashboard.FILL_ALPHA
-assert {dashboard.color_scale(v, domain)[3] for v in (0.0, 0.5, 1.0)} == {
-    dashboard.FILL_ALPHA
-}, [dashboard.color_scale(v, domain) for v in (0.0, 0.5, 1.0)]
-ok("FILL_ALPHA is the one opacity knob and lands on every ramp colour", str(dashboard.FILL_ALPHA))
+assert 0 < settings.FILL_ALPHA < 255, settings.FILL_ALPHA
+assert {data_layer.color_scale(v, domain)[3] for v in (0.0, 0.5, 1.0)} == {
+    settings.FILL_ALPHA
+}, [data_layer.color_scale(v, domain) for v in (0.0, 0.5, 1.0)]
+ok("FILL_ALPHA is the one opacity knob and lands on every ramp colour", str(settings.FILL_ALPHA))
 
 # The ramp is plain RGB so opacity cannot be baked into one endpoint only: a
 # mismatch would truncate zip() and strip the alpha from the whole scale.
-assert len(dashboard.COLOR_LOW) == len(dashboard.COLOR_HIGH) == 3, (
-    dashboard.COLOR_LOW,
-    dashboard.COLOR_HIGH,
+assert len(settings.COLOR_LOW) == len(settings.COLOR_HIGH) == 3, (
+    settings.COLOR_LOW,
+    settings.COLOR_HIGH,
 )
 ok("ramp endpoints are plain RGB; FILL_ALPHA is the only source of opacity")
 
@@ -284,28 +287,28 @@ ok("ramp endpoints are plain RGB; FILL_ALPHA is the only source of opacity")
 #   (2) the interior follows viridis's curve rather than the straight CHORD
 #       between those endpoints.  A 2-stop interpolation of the endpoints is a
 #       different colormap, and the difference is only visible mid-ramp.
-assert dashboard.COLOR_LOW == [68, 1, 84], dashboard.COLOR_LOW
-assert dashboard.COLOR_HIGH == [253, 231, 37], dashboard.COLOR_HIGH
-assert dashboard.VIRIDIS_STOPS[0][1] == dashboard.COLOR_LOW
-assert dashboard.VIRIDIS_STOPS[-1][1] == dashboard.COLOR_HIGH
+assert settings.COLOR_LOW == [68, 1, 84], settings.COLOR_LOW
+assert settings.COLOR_HIGH == [253, 231, 37], settings.COLOR_HIGH
+assert settings.VIRIDIS_STOPS[0][1] == settings.COLOR_LOW
+assert settings.VIRIDIS_STOPS[-1][1] == settings.COLOR_HIGH
 ok("ramp endpoints are viridis's own (68,1,84) -> (253,231,37)")
 
 # Every stop must be reachable: `ramp_rgb` picks the bracketing pair by index,
 # so a gap or an unsorted position would miscolour the map silently.
-assert [t for t, _ in dashboard.VIRIDIS_STOPS] == [i / 8 for i in range(9)], (
-    dashboard.VIRIDIS_STOPS
+assert [t for t, _ in settings.VIRIDIS_STOPS] == [i / 8 for i in range(9)], (
+    settings.VIRIDIS_STOPS
 )
-assert all(len(rgb) == 3 for _, rgb in dashboard.VIRIDIS_STOPS), dashboard.VIRIDIS_STOPS
+assert all(len(rgb) == 3 for _, rgb in settings.VIRIDIS_STOPS), settings.VIRIDIS_STOPS
 ok("viridis ships 9 evenly-spaced plain-RGB stops")
 
 # The stops land exactly, and t=1.0 folds onto the last pair instead of
 # indexing past the array.
-for _i, (_pos, _rgb) in enumerate(dashboard.VIRIDIS_STOPS):
-    assert dashboard.ramp_rgb(_pos) == _rgb, (_pos, dashboard.ramp_rgb(_pos), _rgb)
-assert dashboard.ramp_rgb(0.0) == dashboard.COLOR_LOW
-assert dashboard.ramp_rgb(1.0) == dashboard.COLOR_HIGH
-assert dashboard.ramp_rgb(-0.5) == dashboard.COLOR_LOW, "t below 0 must clamp"
-assert dashboard.ramp_rgb(1.5) == dashboard.COLOR_HIGH, "t above 1 must clamp"
+for _i, (_pos, _rgb) in enumerate(settings.VIRIDIS_STOPS):
+    assert data_layer.ramp_rgb(_pos) == _rgb, (_pos, data_layer.ramp_rgb(_pos), _rgb)
+assert data_layer.ramp_rgb(0.0) == settings.COLOR_LOW
+assert data_layer.ramp_rgb(1.0) == settings.COLOR_HIGH
+assert data_layer.ramp_rgb(-0.5) == settings.COLOR_LOW, "t below 0 must clamp"
+assert data_layer.ramp_rgb(1.5) == settings.COLOR_HIGH, "t above 1 must clamp"
 ok("ramp_rgb hits every stop and clamps out-of-range positions")
 
 # The discriminating check: mid-ramp must be viridis's teal, NOT the chord.
@@ -313,9 +316,9 @@ ok("ramp_rgb hits every stop and clamps out-of-range positions")
 # by the same constant it tests.
 _chord = [
     round(a + (b - a) * 0.5)
-    for a, b in zip(dashboard.COLOR_LOW, dashboard.COLOR_HIGH)
+    for a, b in zip(settings.COLOR_LOW, settings.COLOR_HIGH)
 ]
-_mid = dashboard.ramp_rgb(0.5)
+_mid = data_layer.ramp_rgb(0.5)
 assert _mid != _chord, f"a 2-stop chord passed as viridis: {_mid} == {_chord}"
 assert max(abs(x - y) for x, y in zip(_mid, _chord)) > 40, (_mid, _chord)
 assert _mid == [33, 144, 141], _mid
@@ -330,7 +333,7 @@ def _lum(rgb):
     return 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
 
 
-_samples = [dashboard.ramp_rgb(i / 200) for i in range(201)]
+_samples = [data_layer.ramp_rgb(i / 200) for i in range(201)]
 _lums = [_lum(c) for c in _samples]
 assert all(b >= a - 1e-9 for a, b in zip(_lums, _lums[1:])), [
     round(a, 1) for a, b in zip(_lums, _lums[1:]) if b < a - 1e-9
@@ -343,19 +346,32 @@ ok("ramp lightness is monotonic end to end (greyscale-legible)",
 # anywhere on the curve still gets exactly FILL_ALPHA, and no-data still short-
 # circuits before the ramp is consulted at all.
 for _v in (0.0, 0.25, 0.5, 0.75, 1.0):
-    assert len(dashboard.color_scale(_v * domain[1], domain)) == 4, _v
-    assert dashboard.color_scale(_v * domain[1], domain)[3] == dashboard.FILL_ALPHA
-assert dashboard.color_scale(None, domain) == [0, 0, 0, 0]
+    assert len(data_layer.color_scale(_v * domain[1], domain)) == 4, _v
+    assert data_layer.color_scale(_v * domain[1], domain)[3] == settings.FILL_ALPHA
+assert data_layer.color_scale(None, domain) == [0, 0, 0, 0]
 ok("viridis stops are RGB only: FILL_ALPHA still reaches every painted fill")
 
 # Borders are gone, so a no-data precinct now paints literally nothing.  What
 # still has to hold is that those invisible polygons are pickable (the fill
 # sublayer is asserted above) and that the dead border colour was not left
 # behind as a second source of truth.
-assert not hasattr(dashboard, "LINE_COLOR"), "LINE_COLOR outlived the borders"
-assert dashboard.NO_DATA_COLOR == [0, 0, 0, 0], dashboard.NO_DATA_COLOR
+assert not hasattr(settings, "LINE_COLOR"), "LINE_COLOR outlived the borders"
+assert settings.NO_DATA_COLOR == [0, 0, 0, 0], settings.NO_DATA_COLOR
 ok("no-data precincts stay fully empty regardless of FILL_ALPHA: no fill, no border")
-assert dashboard.color_scale(None, domain) == [0, 0, 0, 0], "no-data must not inherit FILL_ALPHA"
+assert data_layer.color_scale(None, domain) == [0, 0, 0, 0], "no-data must not inherit FILL_ALPHA"
+
+# The council overlay colours must be full RGBA.  This guard sits up here rather
+# than beside the council block below because that block is unreachable: the
+# script aborts at the tooltip-count assert, so a check relying on the rendered
+# district layer never runs.  The statement this replaces lived at module level in
+# the old root dashboard.py, where it fired on EVERY import -- including
+# `streamlit run` -- so letting it live only past the abort would have silently
+# dropped its coverage.  deck.gl sizes a colour attribute from the first record and
+# applies it to all of them, so an RGB list here misreads every district (fc08df5).
+assert len(settings.COUNCIL_LINE_COLOR) == len(settings.COUNCIL_FILL_COLOR) == 4, (
+    settings.COUNCIL_LINE_COLOR,
+    settings.COUNCIL_FILL_COLOR,
+)
 
 # per-field normalization, never a fixed 0-1.  `2024_kamala` spanned 0.51-0.85
 # over the 85 canvassed rows; widening the universe put 481 precincts on the
@@ -364,18 +380,18 @@ assert dashboard.color_scale(None, domain) == [0, 0, 0, 0], "no-data must not in
 # survives it: the expectation is recomputed from the extract's own populated
 # values here, which is a different code path from `domain_for`'s.
 def _populated_range(field, source=rows):
-    vals = [dashboard.to_float(r.get(field)) for r in source]
+    vals = [data_layer.to_float(r.get(field)) for r in source]
     pop = [v for v in vals if v is not None]
     return None if not pop else (min(pop), max(pop))
 
 
-kamala = dashboard.domain_for([dashboard.to_float(r.get("2024_kamala")) for r in rows])
+kamala = data_layer.domain_for([data_layer.to_float(r.get("2024_kamala")) for r in rows])
 assert kamala == _populated_range("2024_kamala"), (kamala, _populated_range("2024_kamala"))
 # The 0 and the 1 are real recorded figures carried by crosswalk-only precincts,
 # and are NOT present among the canvassed 85: the widening moved the range
 # honestly rather than inventing an endpoint.
-_lo = sorted(p for p in index if dashboard.to_float(index[p].get("2024_kamala")) == 0.0)
-_hi = sorted(p for p in index if dashboard.to_float(index[p].get("2024_kamala")) == 1.0)
+_lo = sorted(p for p in index if data_layer.to_float(index[p].get("2024_kamala")) == 0.0)
+_hi = sorted(p for p in index if data_layer.to_float(index[p].get("2024_kamala")) == 1.0)
 assert _lo and _hi, (kamala, _lo[:3], _hi[:3])
 assert not set(_lo) & CANVASSED_CODES and not set(_hi) & CANVASSED_CODES, (
     f"a canvassed precinct recorded an endpoint: {sorted(set(_lo) | set(_hi))}")
@@ -383,42 +399,42 @@ assert set(_lo) <= set(ADDED_CODES) and set(_hi) <= set(ADDED_CODES)
 # "never a fixed 0-1" still has to be true of a field, so it is asserted on one
 # whose populated range is strictly inside: the default metric tops out at the
 # no-rate of responders, and it is recomputed the same way.
-_default_dom = dashboard.domain_for(
-    [dashboard.to_float(r.get(dashboard.DEFAULT_CHOROPLETH)) for r in rows])
-assert _default_dom == _populated_range(dashboard.DEFAULT_CHOROPLETH), _default_dom
+_default_dom = data_layer.domain_for(
+    [data_layer.to_float(r.get(settings.DEFAULT_CHOROPLETH)) for r in rows])
+assert _default_dom == _populated_range(settings.DEFAULT_CHOROPLETH), _default_dom
 assert 0.0 <= _default_dom[0] < _default_dom[1] < 1.0, _default_dom
 assert _default_dom != kamala, (_default_dom, kamala)
-assert dashboard.color_scale(kamala[0], kamala) == dashboard.color_scale(0.0, domain)
+assert data_layer.color_scale(kamala[0], kamala) == data_layer.color_scale(0.0, domain)
 ok("each field scales on its own populated min/max", f"2024_kamala {kamala}, "
    f"default {_default_dom}, {len(_lo)} real zeros / {len(_hi)} real ones")
 
 # --- Decision 1c: the detail panel ----------------------------------------
-panel = dashboard.detail_panel_fields(rows)
+panel = data_layer.detail_panel_fields(rows)
 assert len(panel) == 17, panel
-assert len(dashboard.NO_DATA_FIELDS) == 9
-assert not set(panel) & set(dashboard.NO_DATA_FIELDS), "no-data field in panel"
-assert set(panel) | set(dashboard.NO_DATA_FIELDS) == set(dashboard.DETAIL_FIELDS)
+assert len(settings.NO_DATA_FIELDS) == 9
+assert not set(panel) & set(settings.NO_DATA_FIELDS), "no-data field in panel"
+assert set(panel) | set(settings.NO_DATA_FIELDS) == set(settings.DETAIL_FIELDS)
 ok("detail panel shows the 17 populated fields", f"{len(panel)}")
 ok("the 9 no-data fields are omitted from the panel entirely")
 
 record = next(
     (r for r in rows if r["dallas_county_precinct_number"] == "1046"), rows[0]
 )
-pairs = dashboard.detail_records(record, dictionary, panel)
+pairs = data_layer.detail_records(record, dictionary, panel)
 assert len(pairs) == 17, len(pairs)
 shown = " ".join(p["Metric"] for p in pairs)
 leaked = [f for f in panel if f in shown]
 assert not leaked, f"raw field name leaked into the UI: {leaked}"
 for field in panel:
-    assert dashboard.label_for(dictionary, field) in shown, field
+    assert data_layer.label_for(dictionary, field) in shown, field
 ok("all 17 displayed detail fields resolve to corrected labels")
 ok("no raw field name appears in the detail panel")
 
-assert dashboard.detail_records(None, dictionary, panel) == []
+assert data_layer.detail_records(None, dictionary, panel) == []
 ok("a precinct with no CSV row yields no detail rows (no traceback)")
 
 # a missing dictionary entry fails fast and names the field
-err = expect_raises(KeyError, dashboard.label_for, {}, "pct_nope")
+err = expect_raises(KeyError, data_layer.label_for, {}, "pct_nope")
 assert "pct_nope" in str(err), err
 ok("missing dictionary entry fails fast naming the field")
 
@@ -426,16 +442,16 @@ ok("missing dictionary entry fails fast naming the field")
 # This one is a `{token}` template, the grammar Streamlit's OWN tooltip channel
 # uses -- deliberately not the `@@=` expression grammar the layer props need.
 # `\n` is fine here because the frontend assigns the text via innerText.
-template = dashboard.tooltip_template(dictionary)
+template = data_layer.tooltip_template(dictionary)
 tokens = re.findall(r"\{([^{}]+)\}", template)
-assert tokens == [dashboard.JOIN_LAYER_KEY] + [
-    "v_" + f for f in dashboard.TOOLTIP_FIELDS
+assert tokens == [settings.JOIN_LAYER_KEY] + [
+    "v_" + f for f in settings.TOOLTIP_FIELDS
 ], tokens
 body = re.sub(r"\{[^{}]+\}", "", template)
-for field in dashboard.TOOLTIP_FIELDS:
-    assert dashboard.label_for(dictionary, field) in template, field
+for field in settings.TOOLTIP_FIELDS:
+    assert data_layer.label_for(dictionary, field) in template, field
     assert field not in body, f"raw field name visible in tooltip: {field}"
-assert template.count("\n") == len(dashboard.TOOLTIP_FIELDS), template
+assert template.count("\n") == len(settings.TOOLTIP_FIELDS), template
 ok("tooltip template carries the precinct id plus all labelled slots")
 
 # The guard this refactor needed. The template and the record keys are built
@@ -444,10 +460,10 @@ ok("tooltip template carries the precinct id plus all labelled slots")
 # literal text, which is exactly the "v_2024_prop_r_for" that hit the screen.
 # Asserting the template against a field list was self-consistent and told
 # no lies but proved nothing about the layer; assert against the records.
-hovered = dashboard.decorate(
-    [{"properties": {dashboard.JOIN_LAYER_KEY: "1046"}}],
+hovered = data_layer.decorate(
+    [{"properties": {settings.JOIN_LAYER_KEY: "1046"}}],
     rows,
-    dashboard.DEFAULT_CHOROPLETH,
+    settings.DEFAULT_CHOROPLETH,
 )[0]
 unresolved = [t for t in tokens if t not in hovered]
 assert not unresolved, (
@@ -455,29 +471,29 @@ assert not unresolved, (
     "layer, so it renders as the token text instead of a value"
 )
 # and the counts stay counts once they reach a record
-zeroed = dashboard.decorate(
-    [{"properties": {dashboard.JOIN_LAYER_KEY: "4080"}}], rows, dashboard.DEFAULT_CHOROPLETH
+zeroed = data_layer.decorate(
+    [{"properties": {settings.JOIN_LAYER_KEY: "4080"}}], rows, settings.DEFAULT_CHOROPLETH
 )[0]
 assert index["4080"]["canvass_attempts"] == "0", index["4080"]["canvass_attempts"]
 assert zeroed["v_canvass_attempts"] == "0", zeroed["v_canvass_attempts"]
 ok("every tooltip token resolves against the records the layer is given")
 
 
-fc = dashboard.decorate(
-    [{"properties": {dashboard.JOIN_LAYER_KEY: key}} for key in ["1046", "999999"]],
+fc = data_layer.decorate(
+    [{"properties": {settings.JOIN_LAYER_KEY: key}} for key in ["1046", "999999"]],
     rows,
     zero_field,
 )
 with_data, without_data = fc  # decorate() yields records, not features
 for props in (with_data, without_data):
     slots = [k for k in props if k.startswith("v_")]
-    assert len(slots) == len(dashboard.TOOLTIP_FIELDS), slots
-assert sum(1 for k in with_data if k.startswith("v_")) == len(dashboard.TOOLTIP_FIELDS)
+    assert len(slots) == len(settings.TOOLTIP_FIELDS), slots
+assert sum(1 for k in with_data if k.startswith("v_")) == len(settings.TOOLTIP_FIELDS)
 # a polygon whose precinct is in the CSV: unmatched polygons get em-dashes, not gaps
 assert without_data["__matched"] is False
-assert without_data["__color"] == dashboard.NO_DATA_COLOR
-for field in dashboard.TOOLTIP_FIELDS:
-    assert without_data["v_" + field] == dashboard.NO_DATA_TEXT, field
+assert without_data["__color"] == settings.NO_DATA_COLOR
+for field in settings.TOOLTIP_FIELDS:
+    assert without_data["v_" + field] == settings.NO_DATA_TEXT, field
 ok("a data-less precinct still lists every tooltip label, each as an em-dash")
 assert with_data["__matched"] is True
 assert index["1046"] is not None
@@ -486,11 +502,11 @@ ok("joined precinct carries its own values alongside the tooltip slots")
 # --- join against the live layer ------------------------------------------
 # The live endpoint is part of the plan's contract, so these checks run or the
 # suite fails: a skipped check counts as missing coverage in the matrix audit.
-payload = dashboard.fetch_features()
+payload = data_layer.fetch_features()
 
 
 features = payload["features"]
-stats = dashboard.join_precincts(features, rows)
+stats = data_layer.join_precincts(features, rows)
 assert len(features) == 791, len(features)
 assert stats["polygons"] == 791
 assert stats["csv_rows"] == len(rows), stats["csv_rows"]
@@ -502,15 +518,15 @@ assert stats["csv_rows"] == len(rows), stats["csv_rows"]
 # data/raw/dallas_vtd_to_county_precinct.csv.
 EXPECT_MATCHED = sum(
     1 for f in features
-    if str(f["properties"].get(dashboard.JOIN_LAYER_KEY, "")).strip() in CROSSWALK_CODES
+    if str(f["properties"].get(settings.JOIN_LAYER_KEY, "")).strip() in CROSSWALK_CODES
 )
 assert stats["matched"] == EXPECT_MATCHED, (stats["matched"], EXPECT_MATCHED)
 assert EXPECT_MATCHED == 704, EXPECT_MATCHED
 # ...and the polygons left without a row are exactly the ones the crosswalk
 # cannot attribute -- nothing else, so no polygon loses a row for another reason.
 NO_CROSSWALK = sorted(
-    str(f["properties"].get(dashboard.JOIN_LAYER_KEY, "")).strip() for f in features
-    if str(f["properties"].get(dashboard.JOIN_LAYER_KEY, "")).strip() not in CROSSWALK_CODES
+    str(f["properties"].get(settings.JOIN_LAYER_KEY, "")).strip() for f in features
+    if str(f["properties"].get(settings.JOIN_LAYER_KEY, "")).strip() not in CROSSWALK_CODES
 )
 assert len(NO_CROSSWALK) == 87, len(NO_CROSSWALK)
 assert sorted(NO_CROSSWALK) == sorted(set(NO_CROSSWALK)), "NewPrcnt repeats"
@@ -519,7 +535,7 @@ assert sorted(NO_CROSSWALK) == sorted(set(NO_CROSSWALK)), "NewPrcnt repeats"
 # does name, must have a row. Compared as sets because `stats` reports matched
 # keys, not unmatched polygons; this is the matrix's "87 polygons with no
 # crosswalk entry stay uncovered" row, read off the live layer.
-LAYER_KEYS = dashboard.layer_keys(features)
+LAYER_KEYS = data_layer.layer_keys(features)
 polygons_without_row = sorted(LAYER_KEYS - set(index))
 assert polygons_without_row == sorted(set(NO_CROSSWALK)), (
     f"{len(polygons_without_row)} polygons have no row; expected the "
@@ -530,7 +546,7 @@ assert "1046" in stats["unmatched"], stats["unmatched"]
 # Matrix row "Precinct in CSV, absent from layer": the excluded ids are CSV
 # rows the layer does not carry, so unmatched keys are in the index and NOT
 # in the layer's NewPrcnt set.
-keys = dashboard.layer_keys(features)
+keys = data_layer.layer_keys(features)
 assert "1046" in index and "1046" not in keys
 assert all(k in index and k not in keys for k in stats["unmatched"]), stats["unmatched"]
 # Matrix row "Extract precinct the layer omits": 116 codes the crosswalk names
@@ -548,17 +564,17 @@ ring_shapes = {
     (f["geometry"]["type"], len(f["geometry"]["coordinates"])) for f in features
 }
 assert ring_shapes == {("Polygon", 1)}, ring_shapes
-lo, lat_min, lon_max, lat_max = dashboard.bbox(features)
+lo, lat_min, lon_max, lat_max = data_layer.bbox(features)
 assert -97.6 < lo < lon_max < -96.0 and 32.3 < lat_min < lat_max < 33.2, (lo, lat_max)
 ok("geometry is WGS84 lon/lat as delivered, one ring per polygon")
 
 populated = {}
-for field in dashboard.CHOROPLETH_FIELDS:
-    live = dashboard.decorate(features, rows, field)
+for field in settings.CHOROPLETH_FIELDS:
+    live = data_layer.decorate(features, rows, field)
     vals = [
         r["v_" + field] for r in live if r["__matched"]
     ]
-    populated[field] = sum(1 for v in vals if v != dashboard.NO_DATA_TEXT)
+    populated[field] = sum(1 for v in vals if v != settings.NO_DATA_TEXT)
     assert isinstance(live, list) and len(live) == 791, len(live)
     # deck.gl takes the colour attribute's item size from the first record and
     # applies it to all of them: a ragged mix of [r,g,b] and [r,g,b,a] silently
@@ -571,37 +587,37 @@ for field in dashboard.CHOROPLETH_FIELDS:
     # CSV but blank for the selected field is exactly as unfilled as one absent
     # from it, and only a real number earns a fill at all.
     for record in live:
-        row = index.get(str(record[dashboard.JOIN_LAYER_KEY]).strip())
-        valued = row is not None and dashboard.to_float(row.get(field)) is not None
+        row = index.get(str(record[settings.JOIN_LAYER_KEY]).strip())
+        valued = row is not None and data_layer.to_float(row.get(field)) is not None
         assert is_painted(record["__color"]) == valued, (
-            f"{field}: precinct {record[dashboard.JOIN_LAYER_KEY]} filled "
+            f"{field}: precinct {record[settings.JOIN_LAYER_KEY]} filled "
             f"{record['__color']} but valued={valued}"
         )
         if valued:
-            assert record["__color"][3] == dashboard.FILL_ALPHA, record["__color"]
+            assert record["__color"][3] == settings.FILL_ALPHA, record["__color"]
 ok("per-record __color: painted where data exists, empty where not", str(populated))
 distinct = {
     tuple(r["__color"])
-    for r in dashboard.decorate(features, rows, "2024_kamala")
+    for r in data_layer.decorate(features, rows, "2024_kamala")
     if r["__matched"]
 }
 assert len(distinct) > 1, distinct
 ok("colours actually vary across precincts", f"{len(distinct)} distinct")
 
 # --- pydeck serialisation + the selection-key contract -----------------
-deck = dashboard.build_deck(
-    dashboard.decorate(features, rows[:1], "2024_kamala"), template, features
+deck = ui.build_deck(
+    data_layer.decorate(features, rows[:1], "2024_kamala"), template, features
 )
 layer = deck.layers[0]
-assert layer.id == dashboard.LAYER_ID, layer.id
-assert dashboard.LAYER_ID == "precincts"
+assert layer.id == settings.LAYER_ID, layer.id
+assert settings.LAYER_ID == "precincts"
 blob = json.loads(deck.to_json())
 dj = json.dumps(blob)
-assert dashboard.LAYER_ID in dj, "layer id missing from the serialised deck"
+assert settings.LAYER_ID in dj, "layer id missing from the serialised deck"
 # pydeck's Layer is not itself JSON-serialisable; the contract is the blob
 # Deck.to_json() emits, so assert on the serialised layer dict.
 emitted = blob["layers"][0]
-assert emitted["id"] == dashboard.LAYER_ID, emitted["id"]
+assert emitted["id"] == settings.LAYER_ID, emitted["id"]
 assert emitted["@@type"] == "PolygonLayer", emitted["@@type"]
 # pydeck marks every string layer prop with `@@=` and the browser PARSES what
 # follows, so each must be legal JSON-expression syntax and must name a key the
@@ -632,13 +648,13 @@ leftover = sorted(k for k in emitted if "line" in k.lower())
 assert not leftover, f"border props survived the removal: {leftover}"
 ok("stroked serialises as boolean false and no line props remain")
 assert "=>" not in dj, "an arrow function reached the serialised deck"
-record_keys = set(dashboard.decorate(features, rows, "2024_kamala")[0])
-needed = ({dashboard.JOIN_LAYER_KEY, "__color", "__rings"}
-          | {"v_" + f for f in dashboard.TOOLTIP_FIELDS})
+record_keys = set(data_layer.decorate(features, rows, "2024_kamala")[0])
+needed = ({settings.JOIN_LAYER_KEY, "__color", "__rings"}
+          | {"v_" + f for f in settings.TOOLTIP_FIELDS})
 missing = sorted(needed - record_keys)
 assert not missing, f"an accessor names a key the records do not carry: {missing}"
 ok("every @@= prop is a JSON expression over keys the records have")
-ok("Layer(id=...) is the id pydeck emits and the selection key", dashboard.LAYER_ID)
+ok("Layer(id=...) is the id pydeck emits and the selection key", settings.LAYER_ID)
 
 # ===========================================================================
 # 2026 colour fields + the Dallas Council Districts overlay
@@ -650,19 +666,19 @@ NEW_FIELDS = [
     "2026_prop_city_percent_Against",
     "2026_prop_county_percent_Against",
 ]
-assert dashboard.CHOROPLETH_FIELDS[3:] == NEW_FIELDS, dashboard.CHOROPLETH_FIELDS
-assert dashboard.TOOLTIP_FIELDS[-4:] == NEW_FIELDS, dashboard.TOOLTIP_FIELDS
-assert dashboard.DEFAULT_CHOROPLETH == "prop_a_city_no_canvassing_pct"
+assert settings.CHOROPLETH_FIELDS[3:] == NEW_FIELDS, settings.CHOROPLETH_FIELDS
+assert settings.TOOLTIP_FIELDS[-4:] == NEW_FIELDS, settings.TOOLTIP_FIELDS
+assert settings.DEFAULT_CHOROPLETH == "prop_a_city_no_canvassing_pct"
 # Hover stays the wider list, and the 11 pre-existing tooltip rows keep their
 # order so the new figures land last rather than reshuffling the hover card.
-assert dashboard.TOOLTIP_FIELDS[:11] == [
+assert settings.TOOLTIP_FIELDS[:11] == [
     "prop_a_city_no_canvassing_pct", "canvass_attempts", "response_rate",
     "strong_no", "response_count", "2024_prop_r_for", "2024_prop_u_against",
     "2024_kamala", "2020_percent_Sanders", "2020_percent_Biden",
     "2020_percent_Other",
-], dashboard.TOOLTIP_FIELDS
+], settings.TOOLTIP_FIELDS
 ok("the four 2026 fields are colourable and hover-last; default unmoved",
-   f"{len(dashboard.CHOROPLETH_FIELDS)} colourable / {len(dashboard.TOOLTIP_FIELDS)} hover")
+   f"{len(settings.CHOROPLETH_FIELDS)} colourable / {len(settings.TOOLTIP_FIELDS)} hover")
 
 # --- each new colour field scales as a share ------------------------------
 # The pre-existing loop over CHOROPLETH_FIELDS (":331") already decorates all
@@ -678,28 +694,28 @@ ok("the four 2026 fields are colourable and hover-last; default unmoved",
 # therefore recomputed from the RAW 2026 files, per precinct code -- the extract
 # and `stats` are both under test here, so neither gets to define the number.
 MATCHED_POLYGON_CODES = [
-    str(f["properties"].get(dashboard.JOIN_LAYER_KEY, "")).strip() for f in features
-    if str(f["properties"].get(dashboard.JOIN_LAYER_KEY, "")).strip() in CROSSWALK_CODES
+    str(f["properties"].get(settings.JOIN_LAYER_KEY, "")).strip() for f in features
+    if str(f["properties"].get(settings.JOIN_LAYER_KEY, "")).strip() in CROSSWALK_CODES
 ]
 for field in NEW_FIELDS:
-    dom = dashboard.field_domain(rows, field)
-    assert dom and dashboard.domain_is_share(dom), (field, dom)
+    dom = data_layer.field_domain(rows, field)
+    assert dom and data_layer.domain_is_share(dom), (field, dom)
     assert 0.0 <= dom[0] < dom[1] <= 1.0, (field, dom)
     _expect_pop = len(raw_populated_codes(field, MATCHED_POLYGON_CODES))
     assert populated[field] == _expect_pop, (field, populated[field], _expect_pop)
     assert _expect_pop <= stats["matched"], (field, _expect_pop)
-    live = dashboard.decorate(features, rows, field)
+    live = data_layer.decorate(features, rows, field)
     # a field whose domain is a share must vary: a flat ramp would claim a
     # spread the colour scale does not have.
     assert len({tuple(r["__color"]) for r in live if is_painted(r["__color"])}) > 1, field
     # the record carries a formatted value for the hover card too, percented
     # from the field's own share range (key taken from the extract, not typed in)
-    _probed = next(k for k in sorted(index) if dashboard.to_float(index[k].get(field)) is not None)
-    one = dashboard.decorate(
-        [{"properties": {dashboard.JOIN_LAYER_KEY: _probed}}], rows, field
+    _probed = next(k for k in sorted(index) if data_layer.to_float(index[k].get(field)) is not None)
+    one = data_layer.decorate(
+        [{"properties": {settings.JOIN_LAYER_KEY: _probed}}], rows, field
     )[0]
     assert one["v_" + field].endswith("%"), (field, one["v_" + field])
-    assert one["v_" + field] != dashboard.NO_DATA_TEXT, field
+    assert one["v_" + field] != settings.NO_DATA_TEXT, field
 ok("each new field is a share on its own 0-1 range and hover-formats as a percent",
    f"{populated[NEW_FIELDS[0]]} populated per field")
 
@@ -707,18 +723,18 @@ ok("each new field is a share on its own 0-1 range and hover-formats as a percen
 # while every other matched precinct paints.  It is also absent from the live
 # layer, so drive the polygon directly rather than expecting it in `features`.
 for field in NEW_FIELDS:
-    assert dashboard.to_float(index["1046"].get(field)) is None, field
-    bare = dashboard.decorate(
-        [{"properties": {dashboard.JOIN_LAYER_KEY: "1046"}}], rows, field
+    assert data_layer.to_float(index["1046"].get(field)) is None, field
+    bare = data_layer.decorate(
+        [{"properties": {settings.JOIN_LAYER_KEY: "1046"}}], rows, field
     )[0]
     assert bare["__matched"] is True, field
-    assert bare["__color"] == dashboard.NO_DATA_COLOR, field
+    assert bare["__color"] == settings.NO_DATA_COLOR, field
     assert not is_painted(bare["__color"]), field
-    assert bare["v_" + field] == dashboard.NO_DATA_TEXT, field
+    assert bare["v_" + field] == settings.NO_DATA_TEXT, field
 ok("matrix: blank 2026 value draws nothing and hovers as an em-dash", "precinct 1046")
 
 # --- the live CouncilBoundaries contract ---------------------------------
-council = dashboard.fetch_features(dashboard.COUNCIL_LAYER_URL)["features"]
+council = data_layer.fetch_features(settings.COUNCIL_LAYER_URL)["features"]
 assert len(council) == 14, len(council)
 assert {f["geometry"]["type"] for f in council} == {"Polygon"}, {
     f["geometry"]["type"] for f in council
@@ -737,7 +753,7 @@ for _f in council:
 # what keeps this true, and a native-wkid payload would land outside these bounds.
 assert -97.6 < min(clons) and max(clons) < -96.0, (min(clons), max(clons))
 assert 32.3 < min(clats) and max(clats) < 33.2, (min(clats), max(clats))
-assert dashboard.COUNCIL_LAYER_URL.endswith("f=geojson"), dashboard.COUNCIL_LAYER_URL
+assert settings.COUNCIL_LAYER_URL.endswith("f=geojson"), settings.COUNCIL_LAYER_URL
 ok("live CouncilBoundaries: 14 single-ring districts, DISTRICT 1-14, WGS84 in county")
 
 # --- council_district_records: parts, holes, and geometry it must ignore ----
@@ -749,7 +765,7 @@ def _ring(x0, x1, y0, y1):
 
 _sq = _ring(-96.9, -96.8, 32.7, 32.8)
 _hole = _ring(-96.88, -96.85, 32.72, 32.75)
-_recs = dashboard.council_district_records([
+_recs = data_layer.council_district_records([
     {"properties": {"DISTRICT": "1"}, "geometry": polygon([_sq, _hole])},
     {"properties": {"DISTRICT": "2"}, "geometry": {
         "type": "MultiPolygon", "coordinates": [[[_sq]], [[_hole]]]},
@@ -766,20 +782,20 @@ assert [r["DISTRICT"] for r in _recs] == ["1", "2", "2"], [r["DISTRICT"] for r i
 assert len(_recs[0]["__rings"]) == 2, "a hole was dropped"
 assert _recs[1]["__rings"] == [[_sq]] and _recs[2]["__rings"] == [[_hole]], _recs
 assert all(isinstance(r["__rings"], list) and r["__rings"] for r in _recs)
-live_recs = dashboard.council_district_records(council)
+live_recs = data_layer.council_district_records(council)
 assert len(live_recs) == 14, len(live_recs)
 assert all(r["__rings"] for r in live_recs)
 ok("matrix: MultiPolygon splits per part, holes keep every ring, odd types ignored")
 
 # --- the deck actually handed to st.pydeck_chart, both layers --------------
-deck2 = dashboard.build_deck(
-    dashboard.decorate(features, rows, dashboard.DEFAULT_CHOROPLETH),
+deck2 = ui.build_deck(
+    data_layer.decorate(features, rows, settings.DEFAULT_CHOROPLETH),
     template, features, live_recs,
 )
 blob2 = json.loads(deck2.to_json())
 assert len(blob2["layers"]) == 2, len(blob2["layers"])
 assert [la["id"] for la in blob2["layers"]] == [
-    dashboard.LAYER_ID, dashboard.COUNCIL_LAYER_ID
+    settings.LAYER_ID, settings.COUNCIL_LAYER_ID
 ], [la["id"] for la in blob2["layers"]]
 precinct_layer, district_layer = blob2["layers"]
 # The overlay must not disturb the precinct layer at all: same props as before.
@@ -802,8 +818,8 @@ assert district_layer["stroked"] is True, district_layer.get("stroked")
 # as a record key (fc08df5), and deck.gl sizes a colour attribute from the first
 # record it sees, so an RGB list here would misread every district in the layer.
 for _prop, _const in (
-    ("getLineColor", dashboard.COUNCIL_LINE_COLOR),
-    ("getFillColor", dashboard.COUNCIL_FILL_COLOR),
+    ("getLineColor", settings.COUNCIL_LINE_COLOR),
+    ("getFillColor", settings.COUNCIL_FILL_COLOR),
 ):
     assert district_layer[_prop] == list(_const), district_layer.get(_prop)
     assert not isinstance(district_layer[_prop], str), (
@@ -829,7 +845,7 @@ assert district_layer["getFillColor"][3] < 255, (
 )
 assert district_layer["getLineColor"] != district_layer["getFillColor"]
 # Zoom-surviving width, in device pixels.
-assert district_layer["lineWidthMinPixels"] == dashboard.COUNCIL_LINE_WIDTH_MIN_PIXELS, (
+assert district_layer["lineWidthMinPixels"] == settings.COUNCIL_LINE_WIDTH_MIN_PIXELS, (
     district_layer.get("lineWidthMinPixels")
 )
 assert district_layer["lineWidthMinPixels"] >= 2, district_layer
@@ -857,7 +873,7 @@ assert "=>" not in json.dumps(blob2)
 assert [k for k in precinct_layer if "line" in k.lower()] == []
 assert "lineWidthMinPixels" in district_layer and "getLineColor" in district_layer
 ok("every string prop on both layers is legal @deck.gl/json grammar")
-assert dashboard.COUNCIL_LAYER_ID == "council_districts"
+assert settings.COUNCIL_LAYER_ID == "council_districts"
 
 # The tooltip channel is Deck-level, so it survives the extra layer unchanged --
 # and it still has to be 16 lines with the new figures present.
@@ -866,18 +882,18 @@ assert shipped2 == shipped and shipped2.get("text") == template, shipped2
 assert "html" not in shipped2 and len(blob2["layers"]) == 2
 assert template.count("\n") == 15 and len(NEW_FIELDS) == 4
 for field in NEW_FIELDS:
-    assert dashboard.label_for(dictionary, field) in template, field
+    assert data_layer.label_for(dictionary, field) in template, field
     assert field not in re.sub(r"\{[^{}]+\}", "", template), field
 ok("tooltip still ships on the Deck channel, 16 lines, with layers[1] present")
 
 # Overlay off => exactly one layer, and no district geometry is attached.
-deck_off = dashboard.build_deck(
-    dashboard.decorate(features, rows[:1], dashboard.DEFAULT_CHOROPLETH),
+deck_off = ui.build_deck(
+    data_layer.decorate(features, rows[:1], settings.DEFAULT_CHOROPLETH),
     template, features, None,
 )
 assert len(json.loads(deck_off.to_json())["layers"]) == 1
-assert len(dashboard.build_deck(
-    dashboard.decorate(features, rows[:1], dashboard.DEFAULT_CHOROPLETH),
+assert len(ui.build_deck(
+    data_layer.decorate(features, rows[:1], settings.DEFAULT_CHOROPLETH),
     template, features, [],
 ).layers) == 1, "an empty district record set still added a layer"
 ok("no overlay => precinct layer only")
@@ -1380,7 +1396,7 @@ def _candidate(code, mapping):
 
 
 def _winner_rule(row):
-    share = dashboard.to_float(row.get(bpd.SHARE_COL))
+    share = data_layer.to_float(row.get(bpd.SHARE_COL))
     return (bpd.fullness(row, COUNTED), share if share is not None else -1.0)
 
 
@@ -1422,7 +1438,7 @@ for _c in sorted(_cw_by_precinct):
     if _c not in rebuilt or len(_cw_by_precinct[_c]) < 2:
         continue
     _scored = [(_winner_rule(_candidate(_c, _m)), _m["census_vtd_geoid"],
-                dashboard.to_float(_m[bpd.SHARE_COL])) for _m in _cw_by_precinct[_c]]
+                data_layer.to_float(_m[bpd.SHARE_COL])) for _m in _cw_by_precinct[_c]]
     _top_full = max(s[0][0] for s in _scored)
     _tied = [s for s in _scored if s[0][0] == _top_full]
     _best_share = max((s[2] for s in _scored if s[2] is not None), default=None)
@@ -1444,17 +1460,17 @@ assert sorted(_ties) == ["1044", "1104", "1107", "1300", "1305", "3327", "3504",
                          "4537", "4662"], _ties
 # Each tie really is decided by the share, and the winner is the biggest share.
 for _c in _ties:
-    _shares = sorted((dashboard.to_float(_m[bpd.SHARE_COL]) for _m in _cw_by_precinct[_c]),
+    _shares = sorted((data_layer.to_float(_m[bpd.SHARE_COL]) for _m in _cw_by_precinct[_c]),
                      reverse=True)
     assert len(set(_shares)) == len(_shares), (_c, _shares)  # share, not order, decides
     assert rebuilt[_c][bpd.SHARE_COL] != "", (_c, rebuilt[_c][bpd.SHARE_COL])
-    assert dashboard.to_float(rebuilt[_c][bpd.SHARE_COL]) == _shares[0], (_c, _shares)
+    assert data_layer.to_float(rebuilt[_c][bpd.SHARE_COL]) == _shares[0], (_c, _shares)
 # The overriding rows really do sit on a MINORITY VTD, and really are the fuller
 # one -- i.e. the two exceptions are the rule working, not a bug.
 for _c, _share, _sibling in _over:
     assert _share < _sibling, (_c, _share, _sibling)
     assert _share < 0.5, f"{_c}: attributed to a VTD covering most of it"
-    _alts = {dashboard.to_float(_m[bpd.SHARE_COL]): _m["census_vtd_geoid"]
+    _alts = {data_layer.to_float(_m[bpd.SHARE_COL]): _m["census_vtd_geoid"]
              for _m in _cw_by_precinct[_c]}
     _biggest = max(_alts)
     assert rebuilt[_c]["census_vtd_geoid"] == _alts[_share], (_c, rebuilt[_c]["census_vtd_geoid"])
@@ -1708,21 +1724,21 @@ def pydeck_state(objects):
     return PydeckState({"selection": PydeckSelectionState({"objects": objects, "indices": {}})})
 
 
-hit_props = {dashboard.JOIN_LAYER_KEY: "1046", "v_2024_kamala": "72.0%"}
-assert dashboard.selected_props(pydeck_state({dashboard.LAYER_ID: [hit_props]})) == hit_props
-assert dashboard.selected_props(pydeck_state({})) is None
-assert dashboard.selected_props(None) is None
+hit_props = {settings.JOIN_LAYER_KEY: "1046", "v_2024_kamala": "72.0%"}
+assert ui.selected_props(pydeck_state({settings.LAYER_ID: [hit_props]})) == hit_props
+assert ui.selected_props(pydeck_state({})) is None
+assert ui.selected_props(None) is None
 # PydeckSelectionState has no `selection` key, so the inner state must read as
 # "nothing clicked" rather than silently yielding a value.
-assert dashboard.selected_props(pydeck_state({dashboard.LAYER_ID: [hit_props]}).selection) is None
+assert ui.selected_props(pydeck_state({settings.LAYER_ID: [hit_props]}).selection) is None
 ok("selection reads back from .selection.objects[<layer_id>]; no click -> None")
 
 # pydeck serialises these as mapProvider/mapStyle at the top of the deck JSON.
 # A `not in` on a key it never emits (map_provider) holds for any regression, so
 # assert on the real keys: a slip back to mapbox or a dict style must fail here.
 assert blob["mapProvider"] == "maplibre", blob.get("mapProvider")
-assert blob["mapStyle"] == dashboard.MAP_STYLE_URL, blob.get("mapStyle")
-ok("basemap is a MapLibre style URL string, keyless", dashboard.MAP_STYLE_URL)
+assert blob["mapStyle"] == settings.MAP_STYLE_URL, blob.get("mapStyle")
+ok("basemap is a MapLibre style URL string, keyless", settings.MAP_STYLE_URL)
 
 
 # --- UI rows, driven through Streamlit's own script-test runtime ----------
@@ -1747,7 +1763,7 @@ def square(lon_a, lon_b, lat_a, lat_b):
 def feature(precinct):
     return {
         "type": "Feature",
-        "properties": {dashboard.JOIN_LAYER_KEY: precinct},
+        "properties": {settings.JOIN_LAYER_KEY: precinct},
         "geometry": {"type": "Polygon", "coordinates": [square(-96.9, -96.8, 32.7, 32.8)]},
     }
 
@@ -1776,7 +1792,7 @@ def run_app(fc=None, selected=None, timeout=120):
         # A real PydeckState from Streamlit's own types, standing in for the
         # chart's return value, so main() runs its actual selected_props(chart)
         # call.  Stubbing selected_props instead is what let the broken read ship.
-        state = pydeck_state({dashboard.LAYER_ID: [selected]})
+        state = pydeck_state({settings.LAYER_ID: [selected]})
         dashboard.st.pydeck_chart = lambda *a, **k: state
     try:
         at = AppTest.from_string(MAIN_SCRIPT)
@@ -1845,15 +1861,15 @@ def panel_captions(at):
 # formula changes -- the caption is required to agree with the data, not with a
 # number remembered from an earlier build.
 at = run_app()
-choropleth_labels = [dashboard.label_for(dictionary, f) for f in dashboard.CHOROPLETH_FIELDS]
+choropleth_labels = [data_layer.label_for(dictionary, f) for f in settings.CHOROPLETH_FIELDS]
 side = at.selectbox[0]
 assert side.label == "Colour precincts by", side.label
-assert side.value == dashboard.label_for(dictionary, dashboard.DEFAULT_CHOROPLETH), side.value
+assert side.value == data_layer.label_for(dictionary, settings.DEFAULT_CHOROPLETH), side.value
 assert [o for o in side.options] == choropleth_labels, side.options
 # Colouring and tooltiping are separate concerns now, so the sets differ:
 # everything colourable is also shown on hover, but not vice versa.
-assert set(dashboard.CHOROPLETH_FIELDS) < set(dashboard.TOOLTIP_FIELDS), (
-    dashboard.CHOROPLETH_FIELDS, dashboard.TOOLTIP_FIELDS
+assert set(settings.CHOROPLETH_FIELDS) < set(settings.TOOLTIP_FIELDS), (
+    settings.CHOROPLETH_FIELDS, settings.TOOLTIP_FIELDS
 )
 # --- AC1: the panel resolves a row for a precinct no workbook named --------
 # The whole point of the widening, asserted on the RENDERED panel: the same 17
@@ -1866,7 +1882,7 @@ assert set(dashboard.CHOROPLETH_FIELDS) < set(dashboard.TOOLTIP_FIELDS), (
 # property being asserted would pass while hiding exactly those three.
 _FULL, _BLANK = [], []
 for _c in ADDED_CODES:
-    _vals = [dashboard.to_float(rebuilt[_c].get(_f)) for _f in panel]
+    _vals = [data_layer.to_float(rebuilt[_c].get(_f)) for _f in panel]
     if all(v is not None for v in _vals):
         _FULL.append(_c)
     elif all(v is None for v in _vals):
@@ -1886,29 +1902,29 @@ for _c in _BLANK:
 # includes both partitions and the plan's two exemplars (1044 added with
 # figures, 3111 added without).  17 rows, labelled, no raw field name, no
 # traceback, and the value/no-data split matching the extract cell for cell.
-_labels = [dashboard.label_for(dictionary, _f) for _f in panel]
+_labels = [data_layer.label_for(dictionary, _f) for _f in panel]
 _probe_codes = [c for c in ("1044", "3111", "2607", "4116", "1315", "1724") if c in ADDED_CODES]
 assert set(_probe_codes) <= set(_FULL) | set(_BLANK)
 for _c in _probe_codes:
     _want_blank = _c in _BLANK
-    _at = run_app(fc=stub_fc([_c]), selected={dashboard.JOIN_LAYER_KEY: _c})
+    _at = run_app(fc=stub_fc([_c]), selected={settings.JOIN_LAYER_KEY: _c})
     _tables = panel_tables(_at)
     assert len(_at.dataframe) == 2, f"{_c}: expected both detail panels, got {len(_at.dataframe)}"
-    _frame = _tables[dashboard.DEMOGRAPHICS_PANEL_HEADING]
+    _frame = _tables[settings.DEMOGRAPHICS_PANEL_HEADING]
     assert list(_frame.columns) == ["Metric", "Value"], _frame.columns
     assert len(_frame) == 17, (_c, len(_frame))
     assert list(_frame["Metric"]) == _labels, (_c, list(_frame["Metric"]))
     _shown = " ".join(_frame["Metric"])
-    assert not [_f for _f in dashboard.DETAIL_FIELDS if _f in _shown], (_c, _shown)
+    assert not [_f for _f in settings.DETAIL_FIELDS if _f in _shown], (_c, _shown)
     for _f, _v in zip(panel, _frame["Value"]):
-        _cell = dashboard.to_float(rebuilt[_c].get(_f))
+        _cell = data_layer.to_float(rebuilt[_c].get(_f))
         if _cell is None:
-            assert _v == dashboard.NO_DATA_TEXT, (_c, _f, _v)
+            assert _v == settings.NO_DATA_TEXT, (_c, _f, _v)
             assert _v != "0", (_c, _f)
         else:
-            assert _v != dashboard.NO_DATA_TEXT, (_c, _f)
+            assert _v != settings.NO_DATA_TEXT, (_c, _f)
     if _want_blank:
-        assert list(_frame["Value"]) == [dashboard.NO_DATA_TEXT] * 17, _c
+        assert list(_frame["Value"]) == [settings.NO_DATA_TEXT] * 17, _c
     assert not any("no data in this research extract" in i.value for i in _at.info), _c
 ok("AC1: a crosswalk precinct no workbook named renders the same 17 labelled "
    "metrics, blank where its VTD has no figures", f"{len(_FULL)} with figures, "
@@ -1920,7 +1936,7 @@ ok("AC1: a crosswalk precinct no workbook named renders the same 17 labelled "
 # about what the browser received (AGENTS.md's shipped-defect class).
 for _orphan in ("30A4", "2013"):
     assert _orphan not in CROSSWALK_CODES, _orphan
-    _at = run_app(fc=stub_fc([_orphan]), selected={dashboard.JOIN_LAYER_KEY: _orphan})
+    _at = run_app(fc=stub_fc([_orphan]), selected={settings.JOIN_LAYER_KEY: _orphan})
     assert _at.dataframe == [], f"{_orphan}: a row was invented for a crosswalk-less polygon"
     _infos = [i.value for i in _at.info]
     assert any("no data in this research extract" in v for v in _infos), (_orphan, _infos)
@@ -1931,14 +1947,14 @@ ok("matrix: a crosswalk-less polygon takes the rendered st.info path, no table",
 # Matrix row "Field blank across all rows": the panel stays 17 metrics over the
 # WIDENED extract -- the 9 all-blank fields are still blank in all 820 rows, so
 # the decision is unchanged by 735 new rows, and it is recomputed from them.
-assert len(dashboard.detail_panel_fields(rows)) == 17, len(rows)
-assert len(dashboard.NO_DATA_FIELDS) == 9
+assert len(data_layer.detail_panel_fields(rows)) == 17, len(rows)
+assert len(settings.NO_DATA_FIELDS) == 9
 assert len(panel) == 17
-_still_blank = [f for f in dashboard.DETAIL_FIELDS
-                if not any(dashboard.to_float(r.get(f)) is not None for r in rows)]
-assert _still_blank == dashboard.NO_DATA_FIELDS, _still_blank
-_populate_panel = [f for f in dashboard.DETAIL_FIELDS
-                   if any(dashboard.to_float(r.get(f)) is not None for r in rows)]
+_still_blank = [f for f in settings.DETAIL_FIELDS
+                if not any(data_layer.to_float(r.get(f)) is not None for r in rows)]
+assert _still_blank == settings.NO_DATA_FIELDS, _still_blank
+_populate_panel = [f for f in settings.DETAIL_FIELDS
+                   if any(data_layer.to_float(r.get(f)) is not None for r in rows)]
 assert _populate_panel == panel, (_populate_panel, panel)
 ok("AC4: detail_panel_fields is still 17 over 820 rows, NO_DATA_FIELDS still 9",
    f"{len(rows)} rows")
@@ -1952,7 +1968,7 @@ assert [b.label for b in at.selectbox] == ["Colour precincts by"], [
     b.label for b in at.selectbox
 ]
 menu = at.multiselect[0]
-assert menu.label == dashboard.DISTRICT_SELECTOR_LABEL, menu.label
+assert menu.label == settings.DISTRICT_SELECTOR_LABEL, menu.label
 # The option list is read off the layer (`council`, fetched at :722), not typed
 # in, and arrives NUMERICALLY sorted: 1..14, never the 1,10,11,12,13,14,2 order a
 # plain sort of the strings would give.
@@ -1963,7 +1979,7 @@ assert at.sidebar.multiselect[-1] is menu, "the menu is not in the sidebar"
 assert at.sidebar.selectbox[0] is at.selectbox[0], "the colour selectbox moved"
 ok('sidebar renders the district multi-select with all 14 districts, none chosen')
 # The empty box says nothing on its own, so the empty state is spelled out.
-assert any(dashboard.DISTRICT_NONE_HINT in c.value for c in at.sidebar.caption), [
+assert any(settings.DISTRICT_NONE_HINT in c.value for c in at.sidebar.caption), [
     c.value for c in at.sidebar.caption
 ]
 ok('empty selection renders the "no boundaries" hint')
@@ -2034,7 +2050,7 @@ try:
     at_off = _render()
     assert len(seen) == 1, f"expected one chart call, got {len(seen)}"
     off_layers = json.loads(seen[0].to_json())["layers"]
-    assert [la["id"] for la in off_layers] == [dashboard.LAYER_ID], [
+    assert [la["id"] for la in off_layers] == [settings.LAYER_ID], [
         la["id"] for la in off_layers
     ]
     assert len(off_layers) == 1, len(off_layers)
@@ -2053,13 +2069,13 @@ try:
     at_off.run()
     on_layers = json.loads(seen[-1].to_json())["layers"]
     assert [la["id"] for la in on_layers] == [
-        dashboard.LAYER_ID, dashboard.COUNCIL_LAYER_ID
+        settings.LAYER_ID, settings.COUNCIL_LAYER_ID
     ], [la["id"] for la in on_layers]
     assert len(on_layers[1]["data"]) == 3, len(on_layers[1]["data"])
     # key=int: sorted() on the raw strings would order these 1,12,8, which is the
     # very bug `council_district_options` avoids for the menu.  Here the assertion
     # is about WHICH records survived the filter, so it sorts numerically.
-    got = sorted((r[dashboard.DISTRICT_FIELD] for r in on_layers[1]["data"]), key=int)
+    got = sorted((r[settings.DISTRICT_FIELD] for r in on_layers[1]["data"]), key=int)
     assert got == ["1", "8", "12"], got
     # AC4/AC3 at the render boundary: the props that keep the overlay from
     # stealing a precinct pick or a hover have to hold on the deck actually
@@ -2070,10 +2086,10 @@ try:
     # handed to st.pydeck_chart.
     assert on_layers[1]["filled"] is True, on_layers[1].get("filled")
     assert on_layers[1]["stroked"] is True, on_layers[1].get("stroked")
-    assert on_layers[1]["getFillColor"] == list(dashboard.COUNCIL_FILL_COLOR), (
+    assert on_layers[1]["getFillColor"] == list(settings.COUNCIL_FILL_COLOR), (
         on_layers[1].get("getFillColor")
     )
-    assert on_layers[1]["getLineColor"] == list(dashboard.COUNCIL_LINE_COLOR), (
+    assert on_layers[1]["getLineColor"] == list(settings.COUNCIL_LINE_COLOR), (
         on_layers[1].get("getLineColor")
     )
     assert "tooltip" not in on_layers[1], "a layer tooltip serialises and is never read"
@@ -2082,12 +2098,12 @@ try:
     assert not at_off.warning, [w.value for w in at_off.warning]
     # The hint is gone once a choice exists.
     assert not any(
-        dashboard.DISTRICT_NONE_HINT in c.value for c in at_off.sidebar.caption
+        settings.DISTRICT_NONE_HINT in c.value for c in at_off.sidebar.caption
     ), "the no-boundaries hint survived a non-empty selection"
     ok('three districts selected => exactly those 3 records, overlay props intact')
     # 16 hover lines, one per tooltip field plus the precinct id.
     assert _get_pydeck_tooltip(seen[-1])["text"].count("\n") == len(
-        dashboard.TOOLTIP_FIELDS
+        settings.TOOLTIP_FIELDS
     )
 
     # Selecting ALL 14 reproduces the old whole-layer overlay.
@@ -2102,7 +2118,7 @@ try:
     at_off.multiselect[0].set_value([])
     at_off.run()
     cleared = json.loads(seen[-1].to_json())["layers"]
-    assert [la["id"] for la in cleared] == [dashboard.LAYER_ID], [
+    assert [la["id"] for la in cleared] == [settings.LAYER_ID], [
         la["id"] for la in cleared
     ]
     assert len(council_calls) == before_council, (
@@ -2125,7 +2141,7 @@ try:
     # rendered -- here the cleared, precinct-only deck, which made this look like
     # the overlay had stopped drawing at all.
     click_state = pydeck_state(
-        {dashboard.LAYER_ID: [{dashboard.JOIN_LAYER_KEY: "1045"}]}
+        {settings.LAYER_ID: [{settings.JOIN_LAYER_KEY: "1045"}]}
     )
 
     def _click_chart(deck_arg, *_a, **_k):
@@ -2139,18 +2155,18 @@ try:
     at_click.run()
     click_layers = json.loads(seen[-1].to_json())["layers"]
     assert [la["id"] for la in click_layers] == [
-        dashboard.LAYER_ID, dashboard.COUNCIL_LAYER_ID
+        settings.LAYER_ID, settings.COUNCIL_LAYER_ID
     ], [la["id"] for la in click_layers]
     assert len(council_calls) == before_click + 1, council_calls
     _click_tables = panel_tables(at_click)
     assert len(at_click.dataframe) == 2, "click with the overlay on rendered both detail panels"
-    assert len(_click_tables[dashboard.DEMOGRAPHICS_PANEL_HEADING]) == len(panel), \
-        _click_tables[dashboard.DEMOGRAPHICS_PANEL_HEADING].shape
-    assert len(_click_tables[dashboard.RESULTS_PANEL_HEADING]) == \
-        len(dashboard.RESULTS_PANEL_FIELDS), \
-        _click_tables[dashboard.RESULTS_PANEL_HEADING].shape
+    assert len(_click_tables[settings.DEMOGRAPHICS_PANEL_HEADING]) == len(panel), \
+        _click_tables[settings.DEMOGRAPHICS_PANEL_HEADING].shape
+    assert len(_click_tables[settings.RESULTS_PANEL_HEADING]) == \
+        len(settings.RESULTS_PANEL_FIELDS), \
+        _click_tables[settings.RESULTS_PANEL_HEADING].shape
     ok("click resolves the same two panels with the overlay on",
-       f"{len(panel)} + {len(dashboard.RESULTS_PANEL_FIELDS)} metrics")
+       f"{len(panel)} + {len(settings.RESULTS_PANEL_FIELDS)} metrics")
 
     # Matrix row "Council endpoint down".  Two states now, because the service is
     # asked twice for two different things.
@@ -2170,12 +2186,12 @@ try:
     at_bad.run()
     assert len(seen) == before_bad + 1, f"the map stopped rendering: {seen}"
     assert len(at_bad.warning) == 1, [w.value for w in at_bad.warning]
-    assert dashboard.COUNCIL_LAYER_URL in at_bad.warning[0].value, at_bad.warning[0].value
+    assert settings.COUNCIL_LAYER_URL in at_bad.warning[0].value, at_bad.warning[0].value
     assert "CouncilBoundaries" in at_bad.warning[0].value, at_bad.warning[0].value
     assert not at_bad.error, [e.value for e in at_bad.error]
     assert not at_bad.exception
     bad_layers = json.loads(seen[-1].to_json())["layers"]
-    assert [la["id"] for la in bad_layers] == [dashboard.LAYER_ID], bad_layers
+    assert [la["id"] for la in bad_layers] == [settings.LAYER_ID], bad_layers
     assert len(at_bad.html) == 1, "the legend vanished with the overlay"
     ok("matrix: boundary fetch raises -> one warning naming its URL, map still renders")
 
@@ -2190,7 +2206,7 @@ try:
     before_nolist = len(council_calls)
     at_nolist = _render()
     assert len(at_nolist.warning) == 1, [w.value for w in at_nolist.warning]
-    assert dashboard.COUNCIL_OPTIONS_URL in at_nolist.warning[0].value, (
+    assert settings.COUNCIL_OPTIONS_URL in at_nolist.warning[0].value, (
         at_nolist.warning[0].value
     )
     assert not at_nolist.error, [e.value for e in at_nolist.error]
@@ -2201,7 +2217,7 @@ try:
         f"{len(council_calls) - before_nolist} boundary requests behind an empty menu"
     )
     nolist_layers = json.loads(seen[-1].to_json())["layers"]
-    assert [la["id"] for la in nolist_layers] == [dashboard.LAYER_ID], nolist_layers
+    assert [la["id"] for la in nolist_layers] == [settings.LAYER_ID], nolist_layers
     assert len(at_nolist.html) == 1, "the legend vanished with the menu"
     ok("matrix: menu listing raises -> one warning naming its URL, no boundary request",
        f"{len(council_calls) - before_nolist} new boundary calls")
@@ -2233,7 +2249,7 @@ finally:
     dashboard._cached_district_options = ORIG_OPTIONS
     dashboard.st.pydeck_chart = ORIG_PYDECK_CHART
 assert len(at_offline.error) == 1, f"expected one clear error, got {len(at_offline.error)}"
-assert dashboard.LAYER_URL in at_offline.error[0].value
+assert settings.LAYER_URL in at_offline.error[0].value
 assert not at_offline.warning, [w.value for w in at_offline.warning]
 assert _offline_calls == [], "the precinct layer being down must not fetch council geometry"
 assert _offline_option_calls == [], (
@@ -2248,7 +2264,7 @@ ok("offline path unchanged: one st.error, no warning, no council request of any 
 # records at :818: a check sitting below that failure never runs.  Everything the
 # single-panel layout used to assert is restated against the two-panel one, and
 # asserted on emitted elements rather than on `detail_records` return values.
-_panels = run_app(fc=stub_fc(["1045"]), selected={dashboard.JOIN_LAYER_KEY: "1045"})
+_panels = run_app(fc=stub_fc(["1045"]), selected={settings.JOIN_LAYER_KEY: "1045"})
 _panel_tables = panel_tables(_panels)
 assert len(_panels.dataframe) == 2, (
     f"expected two detail tables, got {len(_panels.dataframe)}")
@@ -2257,7 +2273,7 @@ assert len(_panels.dataframe) == 2, (
 # swap that breaks nothing the prompt asked for.  What has to hold is that BOTH
 # headings exist and each carries its own table.
 assert set(_panel_tables) == {
-    dashboard.DEMOGRAPHICS_PANEL_HEADING, dashboard.RESULTS_PANEL_HEADING
+    settings.DEMOGRAPHICS_PANEL_HEADING, settings.RESULTS_PANEL_HEADING
 }, sorted(_panel_tables)
 assert not any("Precinct detail" in s.value for s in _panels.subheader), \
     "the old single heading is back"
@@ -2293,39 +2309,39 @@ for _col in _cols:
         ["subheader", "caption", "dataframe"], \
         [g.type for g in _col.children.values()]
 assert set(panel_blocks(_panels)) == {
-    dashboard.DEMOGRAPHICS_PANEL_HEADING, dashboard.RESULTS_PANEL_HEADING
+    settings.DEMOGRAPHICS_PANEL_HEADING, settings.RESULTS_PANEL_HEADING
 }, sorted(panel_blocks(_panels))
 _panel_captions = panel_captions(_panels)
-assert _panel_captions[dashboard.DEMOGRAPHICS_PANEL_HEADING] == \
+assert _panel_captions[settings.DEMOGRAPHICS_PANEL_HEADING] == \
     f"Precinct 1045 -- {len(panel)} metrics", _panel_captions
-assert _panel_captions[dashboard.RESULTS_PANEL_HEADING] == (
-    f"Precinct 1045 -- {len(dashboard.RESULTS_PANEL_FIELDS)} metrics"
+assert _panel_captions[settings.RESULTS_PANEL_HEADING] == (
+    f"Precinct 1045 -- {len(settings.RESULTS_PANEL_FIELDS)} metrics"
 ), _panel_captions
 ok("two equal-width columns in one horizontal, wrappable row",
-   f"{len(panel)} | {len(dashboard.RESULTS_PANEL_FIELDS)} metrics")
+   f"{len(panel)} | {len(settings.RESULTS_PANEL_FIELDS)} metrics")
 
 # The results panel lists RESULTS_PANEL_FIELDS in its own order.  Where the two
 # lists overlap the panel must still agree with the hover card cell for cell --
 # that cross-surface check is the whole reason `decorate` and the panel share
 # `format_value`/`fraction_flags` -- but it is driven from the PANEL's list, so it
 # keeps meaning something once the lists are edited apart.
-_results = panel_tables(_panels)[dashboard.RESULTS_PANEL_HEADING]
+_results = panel_tables(_panels)[settings.RESULTS_PANEL_HEADING]
 assert list(_results.columns) == ["Metric", "Value"], _results.columns
 assert list(_results["Metric"]) == [
-    dashboard.label_for(dictionary, f) for f in dashboard.RESULTS_PANEL_FIELDS
+    data_layer.label_for(dictionary, f) for f in settings.RESULTS_PANEL_FIELDS
 ], list(_results["Metric"])
-assert not [f for f in dashboard.RESULTS_PANEL_FIELDS if f in " ".join(_results["Metric"])], \
+assert not [f for f in settings.RESULTS_PANEL_FIELDS if f in " ".join(_results["Metric"])], \
     "raw field name in the results panel"
 _rec1045 = next(
-    r for r in dashboard.decorate(stub_fc(["1045"])["features"], rows,
-                                  dashboard.DEFAULT_CHOROPLETH))
+    r for r in data_layer.decorate(stub_fc(["1045"])["features"], rows,
+                                  settings.DEFAULT_CHOROPLETH))
 _cells = dict(zip(_results["Metric"], _results["Value"]))
-_shared = [f for f in dashboard.RESULTS_PANEL_FIELDS if f in dashboard.TOOLTIP_FIELDS]
+_shared = [f for f in settings.RESULTS_PANEL_FIELDS if f in settings.TOOLTIP_FIELDS]
 assert _shared, "the two lists share no field, so the cross-surface check is vacuous"
 _diverged = [
-    (f, _cells[dashboard.label_for(dictionary, f)], _rec1045["v_" + f])
+    (f, _cells[data_layer.label_for(dictionary, f)], _rec1045["v_" + f])
     for f in _shared
-    if _cells[dashboard.label_for(dictionary, f)] != _rec1045["v_" + f]
+    if _cells[data_layer.label_for(dictionary, f)] != _rec1045["v_" + f]
 ]
 assert not _diverged, f"results panel disagrees with the tooltip: {_diverged}"
 # And every panel cell is the extract's own value, formatted with the panel's own
@@ -2333,26 +2349,26 @@ assert not _diverged, f"results panel disagrees with the tooltip: {_diverged}"
 # panel no longer depends on `decorate` writing anything.
 _row1045 = index["1045"]
 _mismatch = []
-for f in dashboard.RESULTS_PANEL_FIELDS:
-    _want = dashboard.format_value(
-        dashboard.to_float(_row1045.get(f)),
-        fraction=dashboard.domain_is_share(dashboard.field_domain(rows, f)),
+for f in settings.RESULTS_PANEL_FIELDS:
+    _want = data_layer.format_value(
+        data_layer.to_float(_row1045.get(f)),
+        fraction=data_layer.domain_is_share(data_layer.field_domain(rows, f)),
     )
-    if _cells[dashboard.label_for(dictionary, f)] != _want:
-        _mismatch.append((f, _cells[dashboard.label_for(dictionary, f)], _want))
+    if _cells[data_layer.label_for(dictionary, f)] != _want:
+        _mismatch.append((f, _cells[data_layer.label_for(dictionary, f)], _want))
 assert not _mismatch, f"panel value is not the extract's value: {_mismatch}"
 # Counts stay counts, shares stay shares, decided from the extract's range -- the
 # same rule the tooltip applies, so `canvass_attempts` cannot read "100.0%" here.
 for _count_field in ("canvass_attempts", "response_count", "strong_no"):
-    _v = _cells[dashboard.label_for(dictionary, _count_field)]
+    _v = _cells[data_layer.label_for(dictionary, _count_field)]
     assert "%" not in _v, f"{_count_field} rendered as a share: {_v}"
 for _share_field in ("prop_a_city_no_canvassing_pct", "response_rate",
                      "2026_gov_percent_Hinojosa"):
-    _v = _cells[dashboard.label_for(dictionary, _share_field)]
-    assert _v == dashboard.NO_DATA_TEXT or _v.endswith("%"), \
+    _v = _cells[data_layer.label_for(dictionary, _share_field)]
+    assert _v == settings.NO_DATA_TEXT or _v.endswith("%"), \
         f"{_share_field} rendered as a count: {_v}"
 ok("results panel follows its own field list, values agreeing with the extract "
-   "and with the tooltip", f"{len(dashboard.RESULTS_PANEL_FIELDS)} metrics, "
+   "and with the tooltip", f"{len(settings.RESULTS_PANEL_FIELDS)} metrics, "
    f"{len(_shared)} shared with hover")
 
 # --- the lists are genuinely independent, not merely separately named --------
@@ -2362,24 +2378,24 @@ ok("results panel follows its own field list, values agreeing with the extract "
 # actually reached st.pydeck_chart -- asserting the string `tooltip_template` builds
 # in-process would prove nothing about what the browser got.
 _TOOLTIP_ONLY, _PANEL_ONLY = "2020_percent_Other", "2024_percent_Against_R"
-assert _TOOLTIP_ONLY in dashboard.TOOLTIP_FIELDS
-assert _TOOLTIP_ONLY in dashboard.RESULTS_PANEL_FIELDS
-assert _PANEL_ONLY in dictionary and _PANEL_ONLY not in dashboard.TOOLTIP_FIELDS
-assert dashboard.to_float(index["1045"].get(_PANEL_ONLY)) is not None, _PANEL_ONLY
+assert _TOOLTIP_ONLY in settings.TOOLTIP_FIELDS
+assert _TOOLTIP_ONLY in settings.RESULTS_PANEL_FIELDS
+assert _PANEL_ONLY in dictionary and _PANEL_ONLY not in settings.TOOLTIP_FIELDS
+assert data_layer.to_float(index["1045"].get(_PANEL_ONLY)) is not None, _PANEL_ONLY
 
 _seen_decks = []
 
 
 def _spy_chart(deck_arg, *_a, **_k):
     _seen_decks.append(deck_arg)
-    return pydeck_state({dashboard.LAYER_ID: [{dashboard.JOIN_LAYER_KEY: "1045"}]})
+    return pydeck_state({settings.LAYER_ID: [{settings.JOIN_LAYER_KEY: "1045"}]})
 
 
-_ORIG_TIP = list(dashboard.TOOLTIP_FIELDS)
-_ORIG_PANEL = list(dashboard.RESULTS_PANEL_FIELDS)
+_ORIG_TIP = list(settings.TOOLTIP_FIELDS)
+_ORIG_PANEL = list(settings.RESULTS_PANEL_FIELDS)
 try:
-    dashboard.TOOLTIP_FIELDS = _ORIG_TIP + [_TOOLTIP_ONLY]
-    dashboard.RESULTS_PANEL_FIELDS = [
+    settings.TOOLTIP_FIELDS = _ORIG_TIP + [_TOOLTIP_ONLY]
+    settings.RESULTS_PANEL_FIELDS = [
         f for f in _ORIG_PANEL if f != _TOOLTIP_ONLY
     ] + [_PANEL_ONLY]
     # NOT run_app(): it installs its own chart stub in `if selected is not None`
@@ -2396,38 +2412,38 @@ try:
     _split_tables = panel_tables(_split)
 
     # Panel: gained the panel-only field, lost the tooltip-only one.
-    _split_metrics = list(_split_tables[dashboard.RESULTS_PANEL_HEADING]["Metric"])
-    assert dashboard.label_for(dictionary, _PANEL_ONLY) in _split_metrics, _split_metrics
-    assert dashboard.label_for(dictionary, _TOOLTIP_ONLY) not in _split_metrics, _split_metrics
-    assert len(_split_tables[dashboard.RESULTS_PANEL_HEADING]) == len(
-        dashboard.RESULTS_PANEL_FIELDS), len(_split_tables[dashboard.RESULTS_PANEL_HEADING])
+    _split_metrics = list(_split_tables[settings.RESULTS_PANEL_HEADING]["Metric"])
+    assert data_layer.label_for(dictionary, _PANEL_ONLY) in _split_metrics, _split_metrics
+    assert data_layer.label_for(dictionary, _TOOLTIP_ONLY) not in _split_metrics, _split_metrics
+    assert len(_split_tables[settings.RESULTS_PANEL_HEADING]) == len(
+        settings.RESULTS_PANEL_FIELDS), len(_split_tables[settings.RESULTS_PANEL_HEADING])
 
     # Tooltip: gained its own field, and still lists the one the panel dropped.
     _tip_text = _get_pydeck_tooltip(_seen_decks[-1])["text"]
-    assert len(_tip_text.split("\n")) == len(dashboard.TOOLTIP_FIELDS) + 1, _tip_text
-    assert dashboard.label_for(dictionary, _TOOLTIP_ONLY) in _tip_text, _tip_text
-    assert dashboard.label_for(dictionary, _PANEL_ONLY) not in _tip_text, _tip_text
+    assert len(_tip_text.split("\n")) == len(settings.TOOLTIP_FIELDS) + 1, _tip_text
+    assert data_layer.label_for(dictionary, _TOOLTIP_ONLY) in _tip_text, _tip_text
+    assert data_layer.label_for(dictionary, _PANEL_ONLY) not in _tip_text, _tip_text
     # The `v_` key the new token reads is written by `decorate` off TOOLTIP_FIELDS,
     # so the added field resolves instead of rendering its own name.
     _split_rec = next(
-        r for r in dashboard.decorate(stub_fc(["1045"])["features"], rows,
-                                      dashboard.DEFAULT_CHOROPLETH))
+        r for r in data_layer.decorate(stub_fc(["1045"])["features"], rows,
+                                      settings.DEFAULT_CHOROPLETH))
     assert "v_" + _TOOLTIP_ONLY in _split_rec, sorted(_split_rec)[:6]
 
     # Demographics panel: untouched by either edit -- the third list stays separate.
-    assert list(_split_tables[dashboard.DEMOGRAPHICS_PANEL_HEADING]["Metric"]) == _labels
+    assert list(_split_tables[settings.DEMOGRAPHICS_PANEL_HEADING]["Metric"]) == _labels
 finally:
-    dashboard.TOOLTIP_FIELDS = _ORIG_TIP
-    dashboard.RESULTS_PANEL_FIELDS = _ORIG_PANEL
+    settings.TOOLTIP_FIELDS = _ORIG_TIP
+    settings.RESULTS_PANEL_FIELDS = _ORIG_PANEL
     dashboard.st.pydeck_chart = ORIG_PYDECK_CHART
     dashboard._cached_features = ORIG_CACHED
     dashboard._cached_council_features = ORIG_COUNCIL
     dashboard._cached_district_options = ORIG_OPTIONS
 
 # The restore is real, not assumed: re-render and require the original lists back.
-_restored = run_app(fc=stub_fc(["1045"]), selected={dashboard.JOIN_LAYER_KEY: "1045"})
-assert list(panel_tables(_restored)[dashboard.RESULTS_PANEL_HEADING]["Metric"]) == [
-    dashboard.label_for(dictionary, f) for f in _ORIG_PANEL
+_restored = run_app(fc=stub_fc(["1045"]), selected={settings.JOIN_LAYER_KEY: "1045"})
+assert list(panel_tables(_restored)[settings.RESULTS_PANEL_HEADING]["Metric"]) == [
+    data_layer.label_for(dictionary, f) for f in _ORIG_PANEL
 ], "the mutation leaked past the finally"
 ok("tooltip and results panel move independently, demographics panel never does",
    f"+{_PANEL_ONLY} panel only, +{_TOOLTIP_ONLY} hover only")
@@ -2435,7 +2451,7 @@ ok("tooltip and results panel move independently, demographics panel never does"
 # A crosswalk-less polygon: both panels say so in the rendered st.info channel and
 # neither invents a table.  Half an answer -- one panel blank, one silent -- would
 # read as a rendering bug, so both statements are required.
-_orphan_panel = run_app(fc=stub_fc(["999999"]), selected={dashboard.JOIN_LAYER_KEY: "999999"})
+_orphan_panel = run_app(fc=stub_fc(["999999"]), selected={settings.JOIN_LAYER_KEY: "999999"})
 assert _orphan_panel.dataframe == [], [d.value.shape for d in _orphan_panel.dataframe]
 _orphan_infos = [i.value for i in _orphan_panel.info]
 assert len(_orphan_infos) == 2, _orphan_infos
@@ -2447,7 +2463,7 @@ ok("crosswalk-less polygon -> both panels state no data, no table", "2 st.info")
 _blank_panel = run_app(fc=stub_fc(["1045"]), selected=None)
 assert _blank_panel.dataframe == [], _blank_panel.dataframe
 assert set(s.value for s in _blank_panel.subheader) == {
-    dashboard.DEMOGRAPHICS_PANEL_HEADING, dashboard.RESULTS_PANEL_HEADING
+    settings.DEMOGRAPHICS_PANEL_HEADING, settings.RESULTS_PANEL_HEADING
 }, [s.value for s in _blank_panel.subheader]
 _blanks = [i.value for i in _blank_panel.info]
 assert len(_blanks) == 2 and all("Click a precinct" in v for v in _blanks), _blanks
@@ -2459,17 +2475,17 @@ ok("no click -> both headings, two prompts, no empty table")
 # zero for a cell the source left empty.
 _blank_canvass = next(
     c for c in sorted(index)
-    if dashboard.to_float(index[c].get("prop_a_city_no_canvassing_pct")) is None
-    and dashboard.to_float(index[c].get("2026_gov_percent_Hinojosa")) is not None
+    if data_layer.to_float(index[c].get("prop_a_city_no_canvassing_pct")) is None
+    and data_layer.to_float(index[c].get("2026_gov_percent_Hinojosa")) is not None
 )
 _partial = run_app(fc=stub_fc([_blank_canvass]),
-                   selected={dashboard.JOIN_LAYER_KEY: _blank_canvass})
-_pframe = panel_tables(_partial)[dashboard.RESULTS_PANEL_HEADING]
+                   selected={settings.JOIN_LAYER_KEY: _blank_canvass})
+_pframe = panel_tables(_partial)[settings.RESULTS_PANEL_HEADING]
 _pcells = dict(zip(_pframe["Metric"], _pframe["Value"]))
-assert _pcells[dashboard.label_for(dictionary, "prop_a_city_no_canvassing_pct")] \
-    == dashboard.NO_DATA_TEXT, _blank_canvass
-_hino = _pcells[dashboard.label_for(dictionary, "2026_gov_percent_Hinojosa")]
-assert _hino != dashboard.NO_DATA_TEXT and _hino != "0", (_blank_canvass, _hino)
+assert _pcells[data_layer.label_for(dictionary, "prop_a_city_no_canvassing_pct")] \
+    == settings.NO_DATA_TEXT, _blank_canvass
+_hino = _pcells[data_layer.label_for(dictionary, "2026_gov_percent_Hinojosa")]
+assert _hino != settings.NO_DATA_TEXT and _hino != "0", (_blank_canvass, _hino)
 ok("blank canvass field stays an em-dash beside its real 2026 figures", _blank_canvass)
 
 # AC2 for a NEW colourable field, asserted on the emitted payload rather than a
@@ -2478,15 +2494,15 @@ ok("blank canvass field stays an em-dash beside its real 2026 figures", _blank_c
 # of the shipped defects this file exists to catch.  It also sits deliberately
 # ABOVE the known caption failure below, so it actually runs.
 share_field = "2026_gov_percent_Hinojosa"
-share_label = dashboard.label_for(dictionary, share_field)
+share_label = data_layer.label_for(dictionary, share_field)
 at6 = run_app()
 at6.selectbox[0].set_value(share_label)
 at6.run()
-share_domain = dashboard.field_domain(rows, share_field)
-assert dashboard.domain_is_share(share_domain), share_domain
+share_domain = data_layer.field_domain(rows, share_field)
+assert data_layer.domain_is_share(share_domain), share_domain
 assert len(at6.html) == 1, f"expected one legend block, got {len(at6.html)}"
 rendered_legend = at6.html[0].value
-assert rendered_legend == dashboard.legend_html(share_domain), "legend did not follow the field"
+assert rendered_legend == ui.legend_html(share_domain), "legend did not follow the field"
 assert [t.value for t in at6.title] == [share_label], at6.title
 # Compared against the legend's own <span> LABELS, never as substring membership
 # of the whole block: `domain` is now 0.0-1.0, whose "0.0%" is a substring of the
@@ -2495,17 +2511,17 @@ assert [t.value for t in at6.title] == [share_label], at6.title
 _legend_labels = re.findall(r"<span>([^<]*)</span>", rendered_legend)
 assert len(_legend_labels) == 2, _legend_labels
 for endpoint, label in zip(share_domain, _legend_labels):
-    pct = dashboard.format_value(endpoint, True)
+    pct = data_layer.format_value(endpoint, True)
     assert pct.endswith("%") and label == pct, (endpoint, label, pct)
     assert _legend_labels[1] != _legend_labels[0], _legend_labels
 # the default metric's endpoints must be gone, not merely superseded below
-_default_domain = dashboard.field_domain(rows, dashboard.DEFAULT_CHOROPLETH)
+_default_domain = data_layer.field_domain(rows, settings.DEFAULT_CHOROPLETH)
 for endpoint in _default_domain:
-    assert dashboard.format_value(endpoint, True) not in _legend_labels, (
+    assert data_layer.format_value(endpoint, True) not in _legend_labels, (
         endpoint, _legend_labels)
 ok("a new 2026 field renders a percent legend from its own range", f"{_legend_labels}")
 
-expected_colored = populated[dashboard.DEFAULT_CHOROPLETH]
+expected_colored = populated[settings.DEFAULT_CHOROPLETH]
 expected_remaining = stats["polygons"] - expected_colored
 coverage = f"{expected_colored} of {stats['polygons']} polygons are coloured by"
 assert any(coverage in c.value for c in at.caption), [c.value for c in at.caption]
@@ -2530,14 +2546,14 @@ ok("title is the selected choropleth field's readable label")
 # This asserts one html block arrives, holding this field's real range and the
 # same colours the map paints with.
 assert len(at.html) == 1, f"expected exactly one legend block, got {len(at.html)}"
-default_domain = dashboard.field_domain(rows, dashboard.DEFAULT_CHOROPLETH)
+default_domain = data_layer.field_domain(rows, settings.DEFAULT_CHOROPLETH)
 legend = at.html[0].value
-assert isinstance(legend, str) and legend == dashboard.legend_html(default_domain)
+assert isinstance(legend, str) and legend == ui.legend_html(default_domain)
 lo, hi = default_domain
-for endpoint in (dashboard.format_value(lo), dashboard.format_value(hi)):
+for endpoint in (data_layer.format_value(lo), data_layer.format_value(hi)):
     assert endpoint in legend, f"legend does not state the populated min/max {endpoint}"
-for swatch in (dashboard.color_scale(lo, default_domain),
-               dashboard.color_scale(hi, default_domain)):
+for swatch in (data_layer.color_scale(lo, default_domain),
+               data_layer.color_scale(hi, default_domain)):
     red, green, blue, alpha = swatch
     assert f"rgba({red}, {green}, {blue}, {alpha / 255:.3f})" in legend, swatch
 ok("legend ships under the map with this field's own min/max and swatch colours")
@@ -2545,7 +2561,7 @@ ok("legend ships under the map with this field's own min/max and swatch colours"
 # Both sides call color_scale, so the legend inherits FILL_ALPHA instead of
 # restating it.  A legend that hard-coded its own colours would pass every check
 # above and still misrepresent the map the moment opacity changed.
-assert f", {dashboard.FILL_ALPHA / 255:.3f})" in legend, "legend opacity is not FILL_ALPHA"
+assert f", {settings.FILL_ALPHA / 255:.3f})" in legend, "legend opacity is not FILL_ALPHA"
 assert "linear-gradient" in legend, "a two-valued domain must render as a ramp"
 ok("legend opacity is inherited from FILL_ALPHA, not restated")
 
@@ -2568,28 +2584,28 @@ ok("render order is title, map, legend, captions")
 assert at.dataframe == [], f"detail table rendered with no click: {at.dataframe}"
 assert any("Click a precinct" in i.value for i in at.info), [i.value for i in at.info]
 assert set(s.value for s in at.subheader) == {
-    dashboard.DEMOGRAPHICS_PANEL_HEADING, dashboard.RESULTS_PANEL_HEADING
+    settings.DEMOGRAPHICS_PANEL_HEADING, settings.RESULTS_PANEL_HEADING
 }, [s.value for s in at.subheader]
 assert not any("Precinct detail" in s.value for s in at.subheader), "the old single heading is back"
 ok("no selection -> both panel headings, two prompts, no empty table")
 
 # 707 of 791 polygons hold no CSV row; each still carries an em-dash per field.
-decorated = dashboard.decorate(features, rows, dashboard.DEFAULT_CHOROPLETH)
+decorated = data_layer.decorate(features, rows, settings.DEFAULT_CHOROPLETH)
 bare = [r for r in decorated if not r["__matched"]]
 assert len(bare) == 791 - 84, len(bare)
-assert all(r["__color"] == dashboard.NO_DATA_COLOR for r in bare)
-assert all(r["v_" + fld] == dashboard.NO_DATA_TEXT for r in bare for fld in dashboard.TOOLTIP_FIELDS)
+assert all(r["__color"] == settings.NO_DATA_COLOR for r in bare)
+assert all(r["v_" + fld] == settings.NO_DATA_TEXT for r in bare for fld in settings.TOOLTIP_FIELDS)
 ok("a precinct with no CSV row is unfilled and lists every metric as an em-dash", f"{len(bare)} of 791")
 
 # Switch field: colours re-scale to that field's range; tooltip values do not move.
 # `canvass_attempts` is chosen because it is colourable AND a count (0-613), so the
 # rerun also proves the share/count decision reaches the rendered legend.
-attempts = dashboard.label_for(dictionary, "canvass_attempts")
+attempts = data_layer.label_for(dictionary, "canvass_attempts")
 at2 = run_app()
 at2.selectbox[0].set_value(attempts)
 at2.run()
 assert any("49 of 791 polygons are coloured by " + attempts in c.value for c in at2.caption), [c.value for c in at2.caption]
-other = dashboard.decorate(features, rows, "canvass_attempts")
+other = data_layer.decorate(features, rows, "canvass_attempts")
 same = all(
     a[k] == b[k]
     for a, b in zip(decorated, other)
@@ -2597,47 +2613,47 @@ same = all(
     if k.startswith("v_") or k == "__matched"
 )
 assert same, "tooltip values changed when the colour field changed"
-assert dashboard.tooltip_template(dictionary) == template, "tooltip is field-dependent"
+assert data_layer.tooltip_template(dictionary) == template, "tooltip is field-dependent"
 ok("switching field re-scales colour and leaves every tooltip metric unchanged")
 
 # Same rerun: switching the metric must retitle the app AND relabel the legend,
 # and the old field's endpoints must be gone rather than merely superseded.
 assert [t.value for t in at2.title] == [attempts], at2.title
-domain_k = dashboard.field_domain(rows, "canvass_attempts")
+domain_k = data_layer.field_domain(rows, "canvass_attempts")
 legend_k = at2.html[0].value
-assert legend_k == dashboard.legend_html(domain_k), "legend did not follow the field"
-assert not dashboard.domain_is_share(domain_k), domain_k
+assert legend_k == ui.legend_html(domain_k), "legend did not follow the field"
+assert not data_layer.domain_is_share(domain_k), domain_k
 assert ">613<" in legend_k, f"count max not rendered as a count: {legend_k}"
 assert ">0<" in legend_k, f"count min not rendered as a count: {legend_k}"
 # "0.0%" would mean the attempts column was read as a share.
 assert "0.0%" not in legend_k, "a count field was percent-formatted in the legend"
-assert dashboard.format_value(default_domain[1]) not in legend_k, "stale endpoint left"
+assert data_layer.format_value(default_domain[1]) not in legend_k, "stale endpoint left"
 ok("switching field retitles the app and relabels the legend, counts as counts")
 
 # Degenerate domains. A gradient across one number would claim a spread the
 # field does not have; a field with no values at all has no ramp to draw.
-flat = dashboard.legend_html((0.5, 0.5))
+flat = ui.legend_html((0.5, 0.5))
 assert "linear-gradient" not in flat, "gradient implies a range that does not exist"
-assert flat.count(dashboard.format_value(0.5)) == 2, flat
-nothing = dashboard.legend_html(None)
+assert flat.count(data_layer.format_value(0.5)) == 2, flat
+nothing = ui.legend_html(None)
 assert "linear-gradient" not in nothing and "carries a value" in nothing
 assert "No value for this metric" in nothing, "the key vanished along with the ramp"
 ok("legend handles a single-valued field and a field with no values at all")
 
 # Click a polygon whose precinct is in the CSV: 17 labeled metrics, no raw names.
-clicked = {dashboard.JOIN_LAYER_KEY: "1045"}
+clicked = {settings.JOIN_LAYER_KEY: "1045"}
 at3 = run_app(fc=stub_fc(["1045"]), selected=clicked)
 assert len(at3.dataframe) == 2, "click on a CSV precinct rendered no detail table"
-frame = panel_tables(at3)[dashboard.DEMOGRAPHICS_PANEL_HEADING]
+frame = panel_tables(at3)[settings.DEMOGRAPHICS_PANEL_HEADING]
 assert list(frame.columns) == ["Metric", "Value"], frame.columns
 assert len(frame) == 17, len(frame)
 shown = " ".join(frame["Metric"])
-raw = [f for f in dashboard.DETAIL_FIELDS if f in shown]
+raw = [f for f in settings.DETAIL_FIELDS if f in shown]
 assert not raw, f"raw field names in the panel: {raw}"
 for field in panel:
-    assert dashboard.label_for(dictionary, field) in shown, field
-for field in dashboard.NO_DATA_FIELDS:
-    assert dashboard.label_for(dictionary, field) not in shown, field
+    assert data_layer.label_for(dictionary, field) in shown, field
+for field in settings.NO_DATA_FIELDS:
+    assert data_layer.label_for(dictionary, field) not in shown, field
 ok("click polygon -> detail renders the 17 corrected labels and omits the 9 no-data fields")
 
 # The two panels' field lists, values and layout are asserted up at the
@@ -2645,7 +2661,7 @@ ok("click polygon -> detail renders the 17 corrected labels and omits the 9 no-d
 # check sitting below it never runs, which is what let four earlier defects ship.
 
 # Click a polygon with no CSV row: a statement, not a traceback, not a table.
-at4 = run_app(fc=stub_fc(["999999"]), selected={dashboard.JOIN_LAYER_KEY: "999999"})
+at4 = run_app(fc=stub_fc(["999999"]), selected={settings.JOIN_LAYER_KEY: "999999"})
 assert at4.dataframe == [], "unmatched click rendered a detail table"
 assert any("no data" in i.value for i in at4.info), [i.value for i in at4.info]
 ok("click non-CSV polygon -> states no data, no traceback")
@@ -2663,16 +2679,16 @@ finally:
     dashboard._cached_features = ORIG_CACHED
 assert not at5.exception, f"offline path raised a traceback: {at5.exception}"
 assert len(at5.error) == 1, f"expected one clear error, got {len(at5.error)}"
-assert dashboard.LAYER_URL in at5.error[0].value, at5.error[0].value
+assert settings.LAYER_URL in at5.error[0].value, at5.error[0].value
 assert len(at5.dataframe) == 2, "joined-field UI did not render both panels offline"
 _at5_tables = panel_tables(at5)
-assert len(_at5_tables[dashboard.DEMOGRAPHICS_PANEL_HEADING]) == len(panel), \
-    _at5_tables[dashboard.DEMOGRAPHICS_PANEL_HEADING].shape
-assert len(_at5_tables[dashboard.RESULTS_PANEL_HEADING]) == \
-    len(dashboard.RESULTS_PANEL_FIELDS), \
-    _at5_tables[dashboard.RESULTS_PANEL_HEADING].shape
+assert len(_at5_tables[settings.DEMOGRAPHICS_PANEL_HEADING]) == len(panel), \
+    _at5_tables[settings.DEMOGRAPHICS_PANEL_HEADING].shape
+assert len(_at5_tables[settings.RESULTS_PANEL_HEADING]) == \
+    len(settings.RESULTS_PANEL_FIELDS), \
+    _at5_tables[settings.RESULTS_PANEL_HEADING].shape
 assert set(s.value for s in at5.subheader) == {
-    dashboard.DEMOGRAPHICS_PANEL_HEADING, dashboard.RESULTS_PANEL_HEADING
+    settings.DEMOGRAPHICS_PANEL_HEADING, settings.RESULTS_PANEL_HEADING
 }, [s.value for s in at5.subheader]
 ok("layer unreachable -> one st.error naming the URL, both panels still render")
 
@@ -2680,14 +2696,14 @@ ok("layer unreachable -> one st.error naming the URL, both panels still render")
 # offline.  The legend keys the MAP's ramp and there is no map, so none renders:
 # a legend over an absent map would describe colours nobody can see.
 assert [t.value for t in at5.title] == [
-    dashboard.label_for(dictionary, dashboard.DEFAULT_CHOROPLETH)
+    data_layer.label_for(dictionary, settings.DEFAULT_CHOROPLETH)
 ], at5.title
 assert len(at5.html) == 0, f"a legend appeared with no map to key: {at5.html}"
 ok("offline -> title still names the field, no legend without the map")
 
 # A field the dictionary cannot name fails fast rather than rendering blank.
 sabotaged = {k: v for k, v in dictionary.items() if k != "pct_nh_white"}
-err = expect_raises(KeyError, dashboard.label_for, sabotaged, "pct_nh_white")
+err = expect_raises(KeyError, data_layer.label_for, sabotaged, "pct_nh_white")
 assert "pct_nh_white" in str(err), err
 ok("missing dictionary entry fails fast naming the field")
 
