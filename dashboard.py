@@ -62,8 +62,6 @@ JOIN_CSV_KEY = "dallas_county_precinct_number"
 # record keys the tooltip reads from TOOLTIP_FIELDS, never from this list.
 CHOROPLETH_FIELDS = [
     "prop_a_city_no_canvassing_pct",
-    "canvass_attempts",
-    "response_rate",
     "pct_renter_occupied",
     "pct_bachelors_plus",
     "2026_gov_percent_Hinojosa",
@@ -185,7 +183,7 @@ NO_DATA_COLOR = [0, 0, 0, 0]
 # colour attribute from the first record it sees, so a ragged mix misreads every
 # polygon.  Viridis ships as plain RGB for exactly this reason.
 # ---------------------------------------------------------------------------
-FILL_ALPHA = 200
+FILL_ALPHA = 150
 
 # ---------------------------------------------------------------------------
 # The ramp: viridis, matplotlib's default perceptually-uniform sequential
@@ -287,7 +285,7 @@ COUNCIL_LAYER_ID = "council_districts"
 # RGB and RGBA misreads the whole layer -- the same reason FILL_ALPHA lives
 # outside the viridis stops above.
 # ---------------------------------------------------------------------------
-COUNCIL_LINE_COLOR = [150, 150, 150, 140]  # neutral ink border, no blue cast
+COUNCIL_LINE_COLOR = [75, 75, 75, 200]  # neutral ink border, no blue cast
 COUNCIL_FILL_COLOR = [200, 200, 200, 75]  # transparent light gray district wash
 COUNCIL_LINE_WIDTH_MIN_PIXELS = 2  # device px, so a boundary survives zoom-out
 
@@ -469,7 +467,7 @@ def tooltip_template(
     keys `decorate` actually writes.  The result lands in the tooltip element's
     innerText, so `\\n` breaks a line and no markup is involved.
     """
-    lines = [f"Precinct {{{JOIN_LAYER_KEY}}}"]
+    lines = [f"Precinct {{{JOIN_LAYER_KEY}}}", "Click to show precinct demographics and electoral metrics below"]
     for field in TOOLTIP_FIELDS:
         lines.append(f"{label_for(dictionary, field)}: {{{prefix}{field}}}")
     return "\n".join(lines)
