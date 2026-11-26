@@ -17,33 +17,35 @@ Coverage strategy
    FORCE_TEXT are identifiers whose digits are not quantities, so they stay text
    even when they parse as integers.
 
-Run after build_precinct_data.py; it reads the output, so it must not run first.
+Run after src/build_precinct_data.py; it reads that build's output, so it must
+not run first.
 """
 
 import csv
-from pathlib import Path
 
-BASE = Path(__file__).resolve().parent
-DATA = BASE / "data"
-RAW = DATA / "raw"
-IN_CSV = DATA / "precinct_data.csv"
-DFS_DICT = RAW / "dfs-export-precinct-20261108" / "dictionary.csv"
-OUT = DATA / "data_dictionary.csv"
+import settings
 
-# Identifiers: numeric-looking, but arithmetic on them is meaningless.
-FORCE_TEXT = {
-    "dallas_county_precinct_number",
-    "census_vtd_id",
-    "census_vtd_geoid",
-    "source_ref",
-    "district",
-    "name",
-    "geography_hierarchy",
-}
+# Paths come from `src/settings.py`, whose anchors run off `REPO_ROOT` (the parent
+# of `src/`), so `uv run python src/build_data_dictionary.py` reads and writes
+# `data/` at the repo root instead of `src/data/`.
+#
+# The three bindings below stay module globals because `main()` looks them up at
+# CALL time -- a property the suite depends on: it rebinds IN_CSV and OUT to a temp
+# directory so the generator can be run over a fresh rebuild rather than over
+# whatever file happens to be on disk (reading data/data_dictionary.csv off disk
+# would only prove a string exists in the last thing written, the ordering pitfall
+# AGENTS.md records).  `OUT` names the same file as `settings.DICTIONARY_CSV`.
+IN_CSV = settings.PRECINCT_CSV
+DFS_DICT = settings.DFS_DICT_CSV
+OUT = settings.DICTIONARY_CSV
 
-# Placeholder strings a human typed instead of a number.  They do not make a
-# numeric column textual; they are reported as a caveat on the numeric type.
-SENTINELS = {"N/A", "NA", "n/a", "n\\A", "-", "--", "None", "null"}
+# The two type knobs live in settings.py too, and are read there by `reconcile()`:
+# they are classification configuration, not authored vocabulary.
+#
+# What deliberately does NOT move: the three hand-authored tables below --
+# MANUAL, READABLE_OVERRIDES and JOIN_NOTE.  They are the field vocabulary
+# AGENTS.md says is authored in the generator, not runtime configuration, and
+# moving 741 lines of prose would turn settings.py into a dictionary file.
 
 MANUAL = {
     # --- union of the .ods sheets (data/raw/District {1,2,9} precincts.ods) ---
@@ -659,11 +661,11 @@ def reconcile(field, values, declared):
     vals = [v for v in values if v not in ("", None)]
     n_blank = len(values) - len(vals)
     obs = classify(vals)
-    sentinels = sorted({v.strip() for v in vals if classify([v]) == "text" and v.strip() in SENTINELS})
-    n_sentinel = sum(1 for v in vals if classify([v]) == "text" and v.strip() in SENTINELS)
+    sentinels = sorted({v.strip() for v in vals if classify([v]) == "text" and v.strip() in settings.SENTINELS})
+    n_sentinel = sum(1 for v in vals if classify([v]) == "text" and v.strip() in settings.SENTINELS)
     numeric_like = [v for v in vals if classify([v]) in ("integer", "number")]
 
-    if field in FORCE_TEXT:
+    if field in settings.FORCE_TEXT:
         final = "text"
     elif obs in ("integer", "number", "boolean"):
         final = obs
