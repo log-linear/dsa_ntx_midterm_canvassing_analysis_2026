@@ -417,6 +417,892 @@ assert set(panel) | set(settings.NO_DATA_FIELDS) == set(settings.DETAIL_FIELDS)
 ok("detail panel shows the 17 populated fields", f"{len(panel)}")
 ok("the 9 no-data fields are omitted from the panel entirely")
 
+# --- sidebar range filters -------------------------------------------------
+# Every filter check lives ABOVE the tooltip abort on purpose: the AppTest region
+# below :454 never runs, so a rendered-widget assertion written there would
+# enforce nothing while looking like coverage (AGENTS.md's shipped-defect class).
+# What can be proven from the pure layer is proven here -- the field list, each
+# field's bounds, which fields earn no slider, and the mask itself -- and the
+# mask is exercised on real rows rather than on a stub.
+
+# FILTER_FIELDS is the union of the three field tables, in that order, with
+# duplicates folded: 41 fields, of which 32 carry a real range today.
+_UNION = settings.CHOROPLETH_FIELDS + settings.DETAIL_FIELDS + settings.RESULTS_PANEL_FIELDS
+assert data_layer.FILTER_FIELDS == list(dict.fromkeys(_UNION)), data_layer.FILTER_FIELDS
+assert len(data_layer.FILTER_FIELDS) == 41, len(data_layer.FILTER_FIELDS)
+ok("FILTER_FIELDS is CHOROPLETH+DETAIL+RESULTS, de-duplicated in that order",
+   f"{len(data_layer.FILTER_FIELDS)} fields")
+
+filter_bounds = data_layer.filter_bounds(rows)
+# Bounds are the extract's own populated min/max, field for field, recomputed by
+# `_populated_range` -- a different code path from `field_domain`, so a domain
+# averaged, clamped or defaulted to 0-1 anywhere in the layer fails here.
+for _f in data_layer.FILTER_FIELDS:
+    _d = data_layer.field_domain(rows, _f)
+    _want = _populated_range(_f)
+    if _want is None or _want[0] == _want[1]:
+        assert _f not in filter_bounds, f"{_f} got bounds {_d} from domain {_want}"
+    else:
+        assert filter_bounds[_f] == _want, (_f, filter_bounds[_f], _want)
+ok("filter_bounds == _populated_range for every filter field", f"{len(filter_bounds)} bounded")
+
+# Never a typed-in 0-1: the counts reach past it.
+assert filter_bounds["canvass_attempts"] == _populated_range("canvass_attempts"), filter_bounds[
+    "canvass_attempts"]
+assert filter_bounds["canvass_attempts"][1] > 1.0, filter_bounds["canvass_attempts"]
+ok("bounds come from the extract, not 0-1", f"canvass_attempts {filter_bounds['canvass_attempts']}")
+
+# Decision Q1(a): the 9 fields blank across all 820 rows get NO slider, because
+# `lo == max` (or no domain at all) would make st.slider raise
+# StreamlitInvalidMinMaxError.  Same rule `detail_panel_fields` already applies.
+assert len(settings.NO_DATA_FIELDS) == 9, settings.NO_DATA_FIELDS
+assert set(settings.NO_DATA_FIELDS) <= set(data_layer.FILTER_FIELDS), sorted(
+    set(settings.NO_DATA_FIELDS) - set(data_layer.FILTER_FIELDS))
+assert not set(settings.NO_DATA_FIELDS) & set(filter_bounds), sorted(
+    set(settings.NO_DATA_FIELDS) & set(filter_bounds))
+assert len(filter_bounds) == 32, sorted(filter_bounds)
+ok("the 9 NO_DATA_FIELDS are absent from filter_bounds", f"{len(filter_bounds)} sliders emitted")
+
+# Labels come from the dictionary and ONLY from the dictionary: a field the
+# generator does not name, or names with its own raw key, must not reach a widget.
+for _f in data_layer.FILTER_FIELDS:
+    _l = data_layer.label_for(dictionary, _f)
+    assert _l.strip(), _f
+    assert _l != _f, f"raw field name would surface as a slider label: {_f}"
+ok("every filter label is label_for(), never a raw field name",
+   f"{len(data_layer.FILTER_FIELDS)} labels")
+
+# Untouched = inert, on both halves of the seam.  An empty `ranges`, and each
+# field at its own full bound, must both give `visible_precincts` = None (so the
+# map is never recomputed on a default load) and leave `ui.visible_records`
+# returning the caller's OWN list object, not a copy of it.
+assert data_layer.visible_precincts(rows, filter_bounds, {}) is None
+assert data_layer.visible_precincts(rows, filter_bounds, dict(filter_bounds)) is None
+_sentinel = [{"__rings": [[0, 0]]}]
+assert ui.visible_records(_sentinel, None) is _sentinel
+ok("no narrowed range => visible_precincts None and records passed through untouched")
+
+# Narrowing one field hides EXACTLY the rows outside the range plus every blank:
+# a blank is not a zero, so membership in the range is unprovable and the
+# precinct drops.  Expected membership is recomputed from `rows` here, never from
+# the function under test.
+for _f, (_lo, _hi) in sorted(filter_bounds.items()):
+    _mid = _lo + (_hi - _lo) / 2.0
+    _mask = data_layer.visible_precincts(rows, filter_bounds, {_f: (_mid, _hi)})
+    assert _mask is not None, _f
+    _want = {
+        r[settings.JOIN_CSV_KEY].strip()
+        for r in rows
+        if (v := data_layer.to_float(r.get(_f))) is not None and v >= _mid
+    }
+    assert _mask == _want, (_f, sorted(_want - _mask)[:3], sorted(_mask - _want)[:3])
+    _blanks = {
+        r[settings.JOIN_CSV_KEY].strip()
+        for r in rows
+        if (r.get(settings.JOIN_CSV_KEY) or "").strip()
+        and data_layer.to_float(r.get(_f)) is None
+    }
+    assert _blanks and not (_blanks & _mask), (_f, sorted(_blanks & _mask)[:3])
+    assert len(_mask) < len(rows), _f
+ok("narrowing a field hides exactly its outside values and its blanks",
+   f"midpoint sweep over {len(filter_bounds)} fields")
+
+# A precinct with no CSV row -- one of the 87 the crosswalk cannot attribute --
+# is unprovable the same way and therefore hidden by any narrowed field.  The
+# geometry helper is local because the AppTest `feature()` lives below the abort.
+def _polygon(precinct):
+    return {
+        "type": "Feature",
+        "properties": {settings.JOIN_LAYER_KEY: precinct},
+        "geometry": {
+            "type": "Polygon",
+            "coordinates": [[[-96.9, 32.7], [-96.8, 32.7], [-96.8, 32.8], [-96.9, 32.8]]],
+        },
+    }
+
+
+assert "30A4" not in EXTRACT_CODES, "30A4 now has a CSV row; the matrix row moved"
+_no_row = sorted(data_layer.layer_keys([_polygon("30A4")]) - EXTRACT_CODES)
+assert _no_row == ["30A4"], _no_row
+# Narrowed, not full: handing back the bound itself would make the mask None.
+_ren_a, _ren_b = filter_bounds["pct_renter_occupied"]
+_ren_mask = data_layer.visible_precincts(rows, filter_bounds, {"pct_renter_occupied": (_ren_b / 2.0, _ren_b)})
+assert _ren_mask is not None and "30A4" not in _ren_mask, _ren_mask
+ok("a polygon with no CSV row is hidden by a narrowed field", "30A4")
+
+# Two narrowed fields INTERSECT rather than union: a survivor must satisfy both.
+_a, _b = "pct_renter_occupied", "canvass_attempts"
+_ma = data_layer.visible_precincts(rows, filter_bounds, {_a: (_populated_range(_a)[1] * 0.4, _populated_range(_a)[1])})
+_mb = data_layer.visible_precincts(rows, filter_bounds, {_b: (_populated_range(_b)[1] * 0.4, _populated_range(_b)[1])})
+_both = data_layer.visible_precincts(
+    rows, filter_bounds,
+    {_a: (_populated_range(_a)[1] * 0.4, _populated_range(_a)[1]),
+     _b: (_populated_range(_b)[1] * 0.4, _populated_range(_b)[1])})
+assert _both == _ma & _mb, (len(_ma), len(_mb), len(_both), len(_ma & _mb))
+assert len(_both) <= min(len(_ma), len(_mb))
+ok("two narrowed fields intersect", f"{len(_ma)} / {len(_mb)} -> {len(_both)}")
+
+# The mask is keyed on the precinct number and nothing else, so it filters
+# `decorate`-shaped records without touching them: a non-survivor drops, a
+# survivor keeps its geometry, colour and matched flag byte-identical.
+_records = data_layer.decorate(
+    [_polygon(p) for p in ("1046", "1301", "30A4")], rows, settings.DEFAULT_CHOROPLETH
+)
+assert [r[settings.JOIN_LAYER_KEY] for r in _records] == ["1046", "1301", "30A4"], _records
+assert all(len(r["__rings"]) == 1 and len(r["__rings"][0]) == 4 for r in _records), _records
+_survivors = {r[settings.JOIN_CSV_KEY].strip() for r in rows
+              if data_layer.to_float(r.get("pct_renter_occupied")) is not None}
+_kept = ui.visible_records(_records, _survivors)
+assert len(_kept) < len(_records), (len(_kept), len(_records))
+assert all(r[settings.JOIN_LAYER_KEY] in _survivors for r in _kept), _kept
+for _r in _kept:
+    _src = next(x for x in _records if x[settings.JOIN_LAYER_KEY] == _r[settings.JOIN_LAYER_KEY])
+    assert _r is _src, "the mask copied the records instead of keeping them"
+    assert _r["__rings"] == _src["__rings"], _r[settings.JOIN_LAYER_KEY]
+    assert len(_r["__color"]) == 4, _r
+assert all(r["__matched"] for r in _kept), "a survivor without a CSV row was kept"
+ok("visible_records drops a non-survivor and keeps __rings intact",
+   f"{len(_kept)} of {len(_records)}")
+
+# P3 CONTRACT: a record that cannot name its precinct is unprovable, so it is
+# HIDDEN -- one property-less polygon in the live layer must not blank the other
+# 790.  The loud case is the mis-wire: records handed over where NONE carries the
+# key, which is the wrong payload (e.g. the council list) and must not be answered
+# with a silently empty map.
+assert expect_raises(ValueError, ui.visible_records, [{"__rings": []}, {"__rings": []}], {"1046"}), (
+    "an all-missing payload came back without raising")
+_mixed = [
+    {settings.JOIN_LAYER_KEY: "1046", "__rings": []},
+    {"__rings": []},
+    {settings.JOIN_LAYER_KEY: "1301", "__rings": []},
+]
+_mixed_kept = ui.visible_records(_mixed, {"1046"})
+assert [r[settings.JOIN_LAYER_KEY] for r in _mixed_kept] == ["1046"], _mixed_kept
+assert _mixed_kept[0] is _mixed[0], "the mixed case rebuilt the survivor"
+# The stray record drops and the nameable ones are filtered NORMALLY -- no exception,
+# no collateral loss: widen the mask and BOTH key-bearing records come back while the
+# keyless one still does not, so a blank precinct number is never inferred to match.
+_wide = ui.visible_records(_mixed, {"1046", "1301", "30A4"})
+assert [r[settings.JOIN_LAYER_KEY] for r in _wide] == ["1046", "1301"], _wide
+assert len(_wide) == len(_mixed) - 1, (len(_wide), len(_mixed))
+assert _wide[1] is _mixed[2], "widening the mask rebuilt a survivor"
+# A mask that names no record here empties the deck rather than raising: the payload
+# is nameable, so that is a legitimate "nothing matches", not a mis-wire.
+assert ui.visible_records(_mixed, {"9999"}) == []
+ok("visible_records hides a keyless record, raises only when NO record can name itself",
+   f"{len(_wide)} of {len(_mixed)} mixed records kept, all-missing payload raises")
+
+# The dtype decision, pinned because it is the one filter defect that CANNOT be
+# caught by the mask checks: an int slider over a fractional field still hides
+# exactly what it is told to, it just cannot be told anything useful.  Five share
+# fields legitimately span 0.0-1.0, whose endpoints are integral, so a rule that
+# read only the endpoints would make them int sliders with step 1 -- offering 0 and
+# 1, where the only narrowing available hides every fractional precinct.  That
+# would strand the app's own headline use, "precincts above 40% renter-occupied".
+# So the test is on the emitted widget, not on the helper's return value: dtype +
+# step, plus the claim that a midpoint narrowing is actually reachable on the slider.
+_INT_FIELDS = {"canvass_attempts", "strong_no", "response_count"}
+assert _INT_FIELDS <= set(filter_bounds), sorted(_INT_FIELDS - set(filter_bounds))
+_endpoint_integral = {
+    f for f, (lo, hi) in filter_bounds.items() if lo == int(lo) and hi == int(hi)
+}
+assert _INT_FIELDS < _endpoint_integral, (
+    f"nothing disagrees with an endpoints-only rule any more: {_endpoint_integral}")
+_fractional_shares = sorted(_endpoint_integral - _INT_FIELDS)
+assert len(_fractional_shares) == 5, _fractional_shares
+for _f in _INT_FIELDS:
+    _dtype, _lo, _hi, _step, _fmt, _scale = ui._slider_format(
+        _f, filter_bounds[_f], dictionary, rows
+    )
+    assert _dtype is int and _step >= 1 and _fmt == "%d", (_f, _dtype, _step, _fmt)
+    assert _scale == 1.0, (_f, _scale)
+    # DEFECT 2 GUARD, at the helper: the step must DIVIDE the span, or the
+    # far-right handle lands on `min + n*step` short of the bound and a slider
+    # nobody touched reads as narrowed.  `canvass_attempts` spans 613, which is
+    # prime -- a bare round(span/100) gives 6, and 6 does not divide 613.
+    assert int(_hi - _lo) % int(_step) == 0, (_f, _lo, _hi, _step)
+    assert int(_lo) + round((_hi - _lo) / _step) * _step == int(_hi), (_f, _step, _hi)
+    assert all(
+        data_layer.to_float(r.get(_f)) == int(data_layer.to_float(r.get(_f)))
+        for r in rows if data_layer.to_float(r.get(_f)) is not None
+    ), f"{_f} is offered as an integer slider but holds a fraction"
+for _f in _fractional_shares:
+    _dtype, _lo, _hi, _step, _fmt, _scale = ui._slider_format(
+        _f, filter_bounds[_f], dictionary, rows
+    )
+    assert _dtype is float, (
+        f"{_f} span {filter_bounds[_f]} has integral endpoints but fractional values -- an int "
+        f"slider there leaves only {int(filter_bounds[_f][0])} and {int(filter_bounds[_f][1])}")
+    # DEFECT 1 GUARD, at the helper: a share rides a 0-100 percent-point axis, so
+    # the widget's own endpoints are 100x the field's native bound and `scale` is
+    # what divides them back out.  A 0-1 axis here is what made the slider print
+    # `0.4%` while the legend printed `40.0%`.
+    assert _scale == 100.0, (_f, _scale)
+    assert abs(_lo - filter_bounds[_f][0] * 100) < 1e-9 and abs(
+        _hi - filter_bounds[_f][1] * 100) < 1e-9, (_f, _lo, _hi, filter_bounds[_f])
+    assert _fmt == "%.1f%%", (_f, _fmt)
+    # The step is expressed on that same axis, so it is judged against the axis
+    # span: fine granularity, and the far end reachable from the near end.
+    assert 0 < _step < (_hi - _lo) / 2.0, (_f, _step, _lo, _hi)
+# The headline case, stated as a reachable widget position rather than a property.
+# On the percent axis "40% renter-occupied" IS position 40 -- which is the whole
+# point of the axis: the reader drags to the number the legend prints.
+_ren = filter_bounds["pct_renter_occupied"]
+_r_dtype, _r_lo, _r_hi, _r_step, _r_fmt, _r_scale = ui._slider_format(
+    "pct_renter_occupied", _ren, dictionary, rows
+)
+assert _r_dtype is float and _r_scale == 100.0 and _r_step <= 1.0, (
+    _r_dtype, _r_scale, _r_step)
+assert _r_lo <= 40.0 <= _r_hi and round((_r_hi - _r_lo) / _r_step) >= 40, (
+    "40% is not a position this slider can land on", _r_step, _r_lo, _r_hi)
+assert data_layer.visible_precincts(
+    rows, filter_bounds, {"pct_renter_occupied": (40.0 / _r_scale, _r_hi / _r_scale)}
+) is not None, "the headline narrowing does not register"
+ok("slider dtype follows the field's values, not merely its endpoints",
+   f"{len(_INT_FIELDS)} int / {len(_fractional_shares)} float of {len(filter_bounds)}")
+
+# Matrix NARROWED, second clause: a hidden precinct "stays in the panels' index".
+# Q2(a) freezes that the mask reaches the DECK ONLY, so a precinct a filter hid
+# must still resolve to its full CSV row -- otherwise narrowing a slider would
+# silently delete research from the detail panels, and the panels would start
+# agreeing with the map instead of with the extract.  Asserted on the same object
+# `main()` hands `_detail_panels`, so a future change that filters `rows` upstream
+# of the join fails here rather than in production.
+_hidden_probe = sorted(
+    r[settings.JOIN_CSV_KEY].strip()
+    for r in rows
+    if (v := data_layer.to_float(r.get("pct_renter_occupied"))) is not None
+    and v < filter_bounds["pct_renter_occupied"][1] / 2.0
+)[:5]
+assert _hidden_probe, "no low-renter precinct to probe with"
+assert not (set(_hidden_probe) & (_ren_mask or set())), "probe precinct is not actually hidden"
+for _p in _hidden_probe:
+    _row = index.get(_p)
+    assert _row is not None, f"a hidden precinct lost its index row: {_p}"
+    assert _row is index[_p], "the index was rebuilt rather than shared"
+    assert data_layer.to_float(_row.get("pct_renter_occupied")) is not None, _p
+assert ui.visible_records(
+    [{"__rings": [], settings.JOIN_LAYER_KEY: _hidden_probe[0]}], _ren_mask
+) == [], "the hidden precinct still draws"
+ok("a filtered-out precinct keeps its row in the panels' index", f"{len(_hidden_probe)} probed")
+
+# --- the filters, on the RENDERED sidebar ---------------------------------
+# AppTest is usable above the abort as long as every global it touches is defined
+# here rather than borrowed from the region below, so AC1 / AC2 / AC3 and the
+# stale-key row of the matrix are asserted on emitted widgets, not on a Python
+# string the browser never read (AGENTS.md's shipped-defect class).  The precinct
+# layer and both council fetches are stubbed so this stays offline, and the four
+# bindings are restored exactly as `run_app`'s own finally does, because the ~25
+# renders below the abort expect the live ones back.
+# The sample deliberately carries BOTH states of the field AC2 narrows: 40
+# precincts with a renter share, and every precinct whose renter share is blank.
+# Without the blanks in the drawn set, "a blank on a narrowed field is hidden"
+# would be asserted against an empty intersection and pass vacuously.
+_BLANK_RENTER = sorted(
+    r[settings.JOIN_CSV_KEY] for r in rows
+    if (r.get(settings.JOIN_CSV_KEY) or "").strip()
+    and data_layer.to_float(r.get("pct_renter_occupied")) is None
+)
+_FILTER_CODES = [
+    r[settings.JOIN_CSV_KEY] for r in rows
+    if data_layer.to_float(r.get("pct_renter_occupied")) is not None
+][:40] + _BLANK_RENTER
+assert _BLANK_RENTER, "no blank pct_renter_occupied rows: the matrix row moved"
+_FILTER_FC = {
+    "type": "FeatureCollection",
+    "features": [_polygon(k) for k in _FILTER_CODES],
+}
+_FILTER_COUNCIL = {
+    "type": "FeatureCollection",
+    "features": [
+        {
+            "type": "Feature",
+            "properties": {settings.DISTRICT_FIELD: str(n)},
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [[[-97.0, 32.6], [-96.0, 32.6], [-96.0, 33.0], [-97.0, 33.0]]],
+            },
+        }
+        for n in range(1, 15)
+    ],
+}
+_ORIG_FILTER = (
+    dashboard._cached_features,
+    dashboard._cached_council_features,
+    dashboard._cached_district_options,
+    dashboard.st.pydeck_chart,
+)
+
+
+# Its own copy of the entrypoint string: the shared MAIN_SCRIPT is bound below the
+# abort, so this section cannot depend on it existing yet.
+_FILTER_SCRIPT = "import dashboard\ndashboard.main()\n"
+# AppTest is reachable above the abort -- it only needs a ScriptRunContext of its
+# own, which it builds.  Re-imported here because the suite's own binding sits at
+# :1749, below the abort, and this section cannot depend on it having run.
+from streamlit.testing.v1 import AppTest  # noqa: E402
+
+
+def render_filters(seeded=None):
+    """One render of main(); returns (AppTest, [Deck handed to st.pydeck_chart])."""
+    decks = []
+
+    def chart(deck, *_a, **_k):
+        decks.append(deck)
+        return None
+
+    dashboard._cached_features = lambda *_a, **_k: _FILTER_FC
+    dashboard._cached_council_features = lambda *_a, **_k: _FILTER_COUNCIL
+    dashboard._cached_district_options = lambda *_a, **_k: _FILTER_COUNCIL
+    dashboard.st.pydeck_chart = chart
+    try:
+        _at = AppTest.from_string(_FILTER_SCRIPT)
+        _at.default_timeout = 180
+        for _k, _v in (seeded or {}).items():
+            _at.session_state[_k] = _v
+        _at.run()
+    finally:
+        (
+            dashboard._cached_features,
+            dashboard._cached_council_features,
+            dashboard._cached_district_options,
+            dashboard.st.pydeck_chart,
+        ) = _ORIG_FILTER
+    return _at, decks
+
+
+def _drawn(deck):
+    """How many precinct records the deck would draw.
+
+    Resolved by layer ID, never by position: every deck guard here is about the
+    precinct layer, and `layers[0]` only happens to be it while nothing is
+    prepended. A re-ordering would silently aim these assertions at the overlay.
+    """
+    layers = json.loads(deck.to_json())["layers"]
+    return next(len(l["data"]) for l in layers if l["id"] == settings.LAYER_ID)
+
+
+
+def _close(a, b) -> bool:
+    """Slider endpoints compared as floats: an int-dtype widget reports 613, the
+    extract says 613.0, and neither of those is a defect."""
+    return abs(float(a) - float(b)) < 1e-12
+
+
+def _slider_for(at, field):
+    want = data_layer.label_for(dictionary, field)
+    hits = [s for s in at.sidebar.slider if s.label == want]
+    assert len(hits) == 1, (field, want, [s.label for s in at.sidebar.slider])
+    return hits[0]
+
+
+_at_f, _decks_f = render_filters()
+assert not _at_f.exception, _at_f.exception
+# AC1: the expander exists, sits below the district menu, and carries exactly the
+# bounded fields -- one two-sided slider each, at its own full range.
+assert [e.label for e in _at_f.sidebar.expander] == [settings.FILTER_EXPANDER_LABEL], [
+    e.label for e in _at_f.sidebar.expander
+]
+assert len(_at_f.sidebar.slider) == len(filter_bounds) == 32, len(_at_f.sidebar.slider)
+assert list(_at_f.sidebar.multiselect) and list(_at_f.sidebar.selectbox)
+assert [b.label for b in _at_f.sidebar.selectbox] == ["Colour precincts by"], [
+    b.label for b in _at_f.sidebar.selectbox
+]
+assert [b.label for b in _at_f.sidebar.multiselect] == [settings.DISTRICT_SELECTOR_LABEL], [
+    b.label for b in _at_f.sidebar.multiselect
+]
+# Nothing of the filter block leaks above the colour selectbox -- widget ORDER,
+# not merely widget existence.  Iterating the sidebar yields descendants in call
+# order with the expander's own children flattened behind it, so the assertion is
+# about precedence: selectbox, then the district menu, then the expander, then the
+# sliders.  And no caption is added for the filters.
+_order = [b.type for b in _at_f.sidebar]
+assert _order[0] == "sidebar", _order[:2]
+assert _order.index("selectbox") < _order.index("multiselect") < _order.index("expander"), _order
+assert _order.index("expander") < min(i for i, t in enumerate(_order) if t == "slider"), _order
+assert _order.count("slider") == 32 and _order.count("expander") == 1, _order
+# DEFECT (finding #9): the sidebar's caption set must be EXACTLY the one caption the
+# district menu already owns.  Filtering by the word "filter" could never fail -- a
+# caption saying "32 of 791 precincts hidden" contains no "filter" and would slip
+# through, while the plan forbids emitting one at all.  This is the whole set.
+_captions = [c.value for c in _at_f.sidebar.caption]
+assert _captions == [settings.DISTRICT_NONE_HINT] or _captions == [], _captions
+assert len(_captions) <= 1, _captions
+assert not _at_f.sidebar.html and not _at_f.sidebar.multiselect[1:], "extra sidebar widget"
+assert [b.label for b in _at_f.sidebar.button] == [settings.FILTER_RESET_LABEL], [
+    b.label for b in _at_f.sidebar.button
+]
+
+# DEFECT (pass 2, P2): CONTAINMENT, not adjacency.  `at.sidebar` flattens every
+# descendant in paint order, so the order assertions above are equally true if the
+# sliders sit in a bare `st.container()` after the expander, or if the reset button
+# is hoisted out of the block -- both of which leave the expander an empty shell
+# while the PASS line still claims it "holds" the sliders.  Querying the expander
+# element ITSELF walks only its own subtree (`Block.children`), so this fails when a
+# widget moves to a sibling container.  `at.sidebar.expander[0]` is the same node the
+# label assertion above selected, so the two cannot be describing different blocks.
+_expander_f = _at_f.sidebar.expander[0]
+assert _expander_f.type == "expander", _expander_f.type
+assert len(_expander_f.slider) == 32, (
+    f"{len(_expander_f.slider)} sliders INSIDE the expander, "
+    f"{len(_at_f.sidebar.slider)} in the sidebar")
+assert [b.label for b in _expander_f.button] == [settings.FILTER_RESET_LABEL], [
+    b.label for b in _expander_f.button
+]
+# Containment is exhaustive: the sidebar total and the subtree total have to agree, so
+# nothing of the filter block sits outside the expander either.
+assert len(_expander_f.slider) == len(_at_f.sidebar.slider) == len(filter_bounds)
+assert len(_expander_f.button) == len(_at_f.sidebar.button) == 1
+# And each slider is reachable BY KEY from the expander node, not merely by label --
+# a sibling container would walk its own subtree and find nothing.
+for _f in filter_bounds:
+    assert _expander_f.get_by_key(
+        settings.FILTER_SESSION_PREFIX + _f).type == "slider", _f
+ok("AC1: rendered expander holds one slider per bounded field, below the district menu",
+   f"{len(_at_f.sidebar.slider)} sliders")
+ok("the expander's OWN subtree holds all 32 sliders and the reset button",
+   f"{len(_expander_f.slider)} sliders + {len(_expander_f.button)} button inside "
+   f"{settings.FILTER_EXPANDER_LABEL!r}")
+
+# Every slider is created at its own full range, expressed ON THE WIDGET'S AXIS:
+# a share spans 0-100 percent-points, a count spans its own native numbers.
+# `_slider_format`'s scale is what maps one to the other, so the axis endpoints are
+# asserted here against bound*scale rather than against the raw bound.
+_AXIS = {
+    _f: ui._slider_format(_f, _b, dictionary, rows)[1:3] for _f, _b in filter_bounds.items()
+}
+for _f, (_lo, _hi) in filter_bounds.items():
+    _s = _slider_for(_at_f, _f)
+    _alo, _ahi = _AXIS[_f]
+    assert _close(_s.min, _alo) and _close(_s.max, _ahi), (_f, _s.min, _s.max, _alo, _ahi)
+    assert _close(_s.value[0], _alo) and _close(_s.value[1], _ahi), (_f, _s.value, _alo, _ahi)
+    assert _s.proto.format in ("%.1f%%", "%d", "%g"), (_f, _s.proto.format)
+    assert (_s.proto.format == "%.1f%%") == data_layer.domain_is_share(filter_bounds[_f]), (
+        _f, _s.proto.format)
+ok("each slider is created across its own full range, on its own axis",
+   f"{len(filter_bounds)} sliders at full range")
+
+# DEFECT 1 GUARD -- the check that would have caught it.
+# `format` is a literal printf applied to the WIDGET's value, so the only honest
+# comparison is: render the widget's own shipped endpoints through the widget's own
+# shipped format string, and require the legend's string for the native value.
+# Asserting `fmt == "%.1f%%"` alone was the vacuous version of this: it proved the
+# format was chosen, never that it DISPLAYED the right number.  28 of the 32
+# bounded fields are shares, so this is most of the filter UI.
+_share_seen = 0
+for _f, (_lo, _hi) in sorted(filter_bounds.items()):
+    if not data_layer.domain_is_share((_lo, _hi)):
+        continue
+    _s = _slider_for(_at_f, _f)
+    _fmt = _s.proto.format
+    _alo, _ahi = _s.min, _s.max
+    assert _fmt % _alo == data_layer.format_value(_lo, True), (
+        _f, _fmt % _alo, data_layer.format_value(_lo, True))
+    assert _fmt % _ahi == data_layer.format_value(_hi, True), (
+        _f, _fmt % _ahi, data_layer.format_value(_hi, True))
+    _share_seen += 1
+assert _share_seen == 28, _share_seen
+# A mid-axis position has to read right too, not just the two ends the widget
+# ships by default: 40 on the percent axis is 0.4 native is "40.0%" -- the plan's
+# headline query, rendered.  Format string taken from the emitted widget rather
+# than from the loop's last binding.
+_rend = _slider_for(_at_f, "pct_renter_occupied")
+assert _rend.proto.format % 40.0 == data_layer.format_value(0.4, True), (
+    _rend.proto.format % 40.0, data_layer.format_value(0.4, True))
+ok("share sliders display the legend's own percentage string, not 100x smaller",
+   f"{_share_seen} share fields x 2 endpoints + a midpoint")
+
+# DEFECT 2 GUARD -- structural, over ALL 32 emitted widgets.
+# rc-slider aligns a dragged value to `min + n*step`, so if the span is not an
+# integer multiple of the step the populated maximum is NOT a position the handle
+# can reach, and the far-right reading falls short of the bound.  Asserted on the
+# proto the app actually shipped rather than on the helper's return value.
+for _f in filter_bounds:
+    _s = _slider_for(_at_f, _f)
+    _span = float(_s.max) - float(_s.min)
+    _st = float(_s.step)
+    assert _st > 0, (_f, _st)
+    _n = _span / _st
+    assert abs(_n - round(_n)) <= 1e-6, (
+        f"{_f}: step {_st} does not divide span {_span}; far-right reports "
+        f"{_s.min + round(_n) * _st}, not {_s.max}")
+    assert float(_s.min) + round(_n) * _st <= float(_s.max) + 1e-9, (_f, _s.max)
+ok("far-right handle reaches the populated bound for all 32 sliders",
+   f"{len(filter_bounds)} widgets, span/step integral for each")
+
+# The mask's own half of the same contract: a value sitting exactly ON a bound is
+# not "narrowed", with or without a float round trip behind it.
+assert data_layer.visible_precincts(
+    rows, filter_bounds, {"pct_renter_occupied": (0.0, 100.0 / 100.0)}) is None
+assert data_layer.visible_precincts(
+    rows, filter_bounds, {"canvass_attempts": (0, 613)}) is None
+assert data_layer.visible_precincts(
+    rows, filter_bounds, {"canvass_attempts": (0, 612)}) is not None, (
+    "a handle one step short of the bound must read as narrowed, not untouched")
+# The tolerance is load-bearing, not defensive padding.  `pct_vacant`'s upper bound
+# round trips through the percent axis to a float strictly LESS than the native
+# bound, so an exact `hi < bound[1]` compare -- the pre-fix test -- would read a
+# never-touched slider as narrowed and hide precincts on load.  Asserted on the
+# drift itself, so the case cannot quietly disappear if the axis arithmetic changes.
+_drift_field = "pct_vacant"
+_dl, _dh = filter_bounds[_drift_field]
+_axis_hi = (_dh * 100.0) / 100.0
+assert _axis_hi < _dh, (
+    f"{_drift_field} no longer drifts on the axis round trip; this check proves nothing "
+    f"({repr(_dh)} == {repr(_axis_hi)})")
+assert _dh - _axis_hi < (_dh - _dl) * 1e-9, (_dh, _axis_hi)
+assert data_layer.visible_precincts(rows, filter_bounds, {_drift_field: (_dl, _axis_hi)}) is None, (
+    "an axis round trip inside the tolerance registered as a narrowing")
+ok("bound-touching and axis-round-tripped ranges both read as untouched",
+   f"{_drift_field} drifts {repr(_dh)} -> {repr(_axis_hi)} and is still inert")
+
+# PASS 2 (P1): the same tolerance has to reach MEMBERSHIP, not only the narrowed-side
+# test above.  A share's percent axis round trips to a hair INSIDE its own bound, so
+# under an exact `lo <= v <= hi` a reader who moves only the LEFT handle loses the
+# precinct sitting on the untouched right endpoint -- precinct 3041 disappears behind a
+# right handle displaying the identical 39.6%.  Enumerated from the shipped axis
+# arithmetic rather than from a remembered field name: for every share field whose
+# step-aligned round-tripped endpoints fall strictly inside its bound, the min-holder
+# and the max-holder must survive a midpoint narrowing of the OTHER handle.
+_DRIFT_SHARES = []
+for _f, (_lo, _hi) in sorted(filter_bounds.items()):
+    if not data_layer.domain_is_share((_lo, _hi)):
+        continue
+    _dt, _a0, _a1, _st, _fmt, _sc = ui._slider_format(_f, (_lo, _hi), dictionary, rows)
+    _n0 = float(_a0) / _sc
+    _n1 = (float(_a0) + round((float(_a1) - float(_a0)) / float(_st)) * float(_st)) / _sc
+    if _n0 < _lo or _n0 > _lo or _n1 < _hi or _n1 > _hi:
+        _DRIFT_SHARES.append((_f, _n0, _n1))
+assert len(_DRIFT_SHARES) == 5, [f for f, _, _ in _DRIFT_SHARES]
+for _f, _n0, _n1 in _DRIFT_SHARES:
+    _lo, _hi = filter_bounds[_f]
+    _populated = {
+        str(r.get(settings.JOIN_CSV_KEY)).strip(): data_layer.to_float(r.get(_f))
+        for r in rows
+        if (r.get(settings.JOIN_CSV_KEY) or "").strip()
+        and data_layer.to_float(r.get(_f)) is not None
+    }
+    _maxv, _minv = max(_populated.values()), min(_populated.values())
+    _maxh = {k for k, v in _populated.items() if v == _maxv}
+    _minh = {k for k, v in _populated.items() if v == _minv}
+    _mid = _lo + (_hi - _lo) / 2.0
+    # Left handle to the midpoint, right handle left reading the bound: max-holder lives.
+    _keep_hi = data_layer.visible_precincts(rows, filter_bounds, {_f: (_mid, _n1)})
+    assert _keep_hi is not None and _maxh <= _keep_hi, (
+        f"{_f}: an untouched right handle reading {_n1!r} for bound {_hi!r} hid the "
+        f"max-holder {sorted(_maxh)[:3]}")
+    # Right handle to the midpoint, left handle left reading the bound: min-holder lives.
+    _keep_lo = data_layer.visible_precincts(rows, filter_bounds, {_f: (_n0, _mid)})
+    assert _keep_lo is not None and _minh <= _keep_lo, (
+        f"{_f}: an untouched left handle reading {_n0!r} for bound {_lo!r} hid the "
+        f"min-holder {sorted(_minh)[:3]}")
+    # And the tolerance is a float hair, not an open range: pulling the right handle in
+    # by 1% of the span -- six orders of magnitude more than tol -- must drop the
+    # max-holder.  Without this the membership fix could read as "ignore hi".
+    _tight = data_layer.visible_precincts(
+        rows, filter_bounds, {_f: (_mid, _hi - (_hi - _lo) * 0.01)})
+    assert _tight is not None and not (_maxh & _tight), (
+        f"{_f}: the membership tolerance swallowed a real 1%-of-span narrowing")
+# The reported reproduction, by name, so the exact survivor count cannot regress
+# unnoticed: pct_vacant's sole max-holder is precinct 3041.
+_pvl, _pvh = filter_bounds["pct_vacant"]
+_pv_mask = data_layer.visible_precincts(
+    rows, filter_bounds, {"pct_vacant": (_pvl + (_pvh - _pvl) / 2.0, (_pvh * 100.0) / 100.0)})
+assert (_pvh * 100.0) / 100.0 < _pvh, "pct_vacant no longer drifts; this check proves nothing"
+assert "3041" in _pv_mask, f"pct_vacant lost its own max-holder: {len(_pv_mask)} survivors"
+assert len(_pv_mask) == len({
+    r[settings.JOIN_CSV_KEY].strip() for r in rows
+    if (r.get(settings.JOIN_CSV_KEY) or "").strip()
+    and (v := data_layer.to_float(r.get("pct_vacant"))) is not None
+    and v >= _pvl + (_pvh - _pvl) / 2.0
+}), f"pct_vacant narrowing lost a precinct: {len(_pv_mask)} survivors"
+ok("endpoint holders stay visible: 5 drifting share fields keep min+max holders",
+   f"{len(_DRIFT_SHARES)} fields, 3041 among {_pv_mask and len(_pv_mask)} pct_vacant survivors")
+
+# DEFECT 2, driven on the REAL widget rather than on the helper's numbers.
+# The structural span/step check above proves the position exists; this proves the
+# app still hides nothing when `canvass_attempts` -- the field whose span 613 is
+# prime, and whose step of 6 reported 612 far-right -- is parked at the far-right
+# position a drag can ACTUALLY land on.  That position is computed from the emitted
+# widget's own proto as `min + round((max-min)/step) * step`, which is exactly the
+# alignment rc-slider applies, so it is not the default value written back to
+# itself: under a step that fails to divide the span this lands short of the bound,
+# and the assertion then fails for the right reason.
+_ATTEMPTS = "canvass_attempts"
+_a_lo, _a_hi = _AXIS[_ATTEMPTS]
+assert _a_hi == 613 and _a_lo == 0, (_a_lo, _a_hi)
+_full_right = []
+dashboard._cached_features = lambda *_a2, **_k2: _FILTER_FC
+dashboard._cached_council_features = lambda *_a2, **_k2: _FILTER_COUNCIL
+dashboard._cached_district_options = lambda *_a2, **_k2: _FILTER_COUNCIL
+dashboard.st.pydeck_chart = lambda d, *_a2, **_k2: _full_right.append(d)
+try:
+    _at_fr = AppTest.from_string(_FILTER_SCRIPT)
+    _at_fr.default_timeout = 180
+    _at_fr.run()
+    _fr = _slider_for(_at_fr, _ATTEMPTS)
+    _drag_max = float(_fr.min) + round((float(_fr.max) - float(_fr.min)) / float(_fr.step)) * float(
+        _fr.step
+    )
+    assert _close(_drag_max, _a_hi), (
+        f"the far-right drag position is {_drag_max}, not the bound {_a_hi}: "
+        f"step {_fr.step} does not divide the span")
+    _at_fr.session_state[settings.FILTER_SESSION_PREFIX + _ATTEMPTS] = (_a_lo, _drag_max)
+    _at_fr.run()
+    _fr_after = _slider_for(_at_fr, _ATTEMPTS)
+finally:
+    (
+        dashboard._cached_features,
+        dashboard._cached_council_features,
+        dashboard._cached_district_options,
+        dashboard.st.pydeck_chart,
+    ) = _ORIG_FILTER
+assert not _at_fr.exception, _at_fr.exception
+assert _close(_fr_after.value[1], _a_hi), (_fr_after.value, _a_hi)
+_visible_fr = data_layer.visible_precincts(
+    rows, filter_bounds, {_ATTEMPTS: (float(_fr_after.value[0]), float(_fr_after.value[1]))})
+assert _visible_fr is None, (
+    f"a far-right {_ATTEMPTS} handle computed a mask: {_fr_after.value}")
+assert _drawn(_full_right[-1]) == len(_FILTER_FC["features"]), (
+    _drawn(_full_right[-1]), len(_FILTER_FC["features"]))
+ok("a canvass_attempts slider dragged to its far-right position hides nothing",
+   f"drag max {_drag_max:.0f} == bound -> visible is None")
+
+# A fresh default load draws every polygon, because no mask is computed at all.
+assert _drawn(_decks_f[0]) == len(_FILTER_FC["features"]), _drawn(_decks_f[0])
+ok("AC1: untouched sliders draw the whole precinct layer",
+   f"{_drawn(_decks_f[0])} records")
+
+# AC2: narrow ONE slider through the rendered widget and rerun.  The deck handed
+# to st.pydeck_chart must carry exactly the survivors of that range -- computed
+# here from the CSV, so the widget and the mask cannot disagree -- and one fewer
+# polygon than the layer has.  The spy is installed BEFORE the first run so the
+# rerun's deck is captured, which is what makes this an assertion on the payload
+# the browser received rather than on a helper's return value.
+_NARROW = "pct_renter_occupied"
+_a, _b = filter_bounds[_NARROW]
+# Widget values are on the field's AXIS (percent-points for a share); the mask and
+# `filter_bounds` stay in the field's NATIVE unit.  Both are asserted on below, and
+# the two must not be confused -- that confusion was defect 1.
+_na, _nb = _AXIS[_NARROW]
+_narrow_axis = ((_na + _nb) / 2.0, _nb)
+_narrow_native = (_b / 2.0, _b)
+_seen_n = []
+dashboard._cached_features = lambda *_a2, **_k2: _FILTER_FC
+dashboard._cached_council_features = lambda *_a2, **_k2: _FILTER_COUNCIL
+dashboard._cached_district_options = lambda *_a2, **_k2: _FILTER_COUNCIL
+dashboard.st.pydeck_chart = lambda d, *_a2, **_k2: _seen_n.append(d)
+try:
+    _at_n = AppTest.from_string(_FILTER_SCRIPT)
+    _at_n.default_timeout = 180
+    _at_n.run()
+    _narrowed = _slider_for(_at_n, _NARROW)
+    assert _close(_narrowed.value[0], _na) and _close(_narrowed.value[1], _nb), _narrowed.value
+    _narrowed.set_value(_narrow_axis)
+    _at_n.run()
+finally:
+    (
+        dashboard._cached_features,
+        dashboard._cached_council_features,
+        dashboard._cached_district_options,
+        dashboard.st.pydeck_chart,
+    ) = _ORIG_FILTER
+assert not _at_n.exception, _at_n.exception
+# The range the app derived from the axis reading, in native units: 50 on a
+# percent-point axis must reach `visible_precincts` as 0.5, not as 50.
+_ranges_native = {_NARROW: _narrow_native}
+_n_arrow = data_layer.visible_precincts(rows, filter_bounds, _ranges_native)
+assert _n_arrow is not None and _n_arrow != set(), _NARROW
+# And the axis reading must NOT be usable as a native range: 50.0 lies outside a
+# 0-1 share entirely, so a missing division here would hide every single precinct.
+assert not (data_layer.visible_precincts(rows, filter_bounds,
+           {_NARROW: _narrow_axis}) or set()) & set(_FILTER_CODES), (
+    "an axis range reached the mask unconverted -- filter_sliders must divide by scale")
+assert len(_seen_n) == 2, len(_seen_n)
+assert _drawn(_seen_n[0]) == len(_FILTER_FC["features"]), "the untouched render changed"
+_got_n = {
+    str(r[settings.JOIN_LAYER_KEY]).strip()
+    for r in next(
+        l for l in json.loads(_seen_n[-1].to_json())["layers"] if l["id"] == settings.LAYER_ID
+    )["data"]
+}
+assert _got_n == _n_arrow & {str(k).strip() for k in _FILTER_CODES}, (
+    len(_got_n), len(_n_arrow), sorted(_got_n ^ _n_arrow)[:5]
+)
+assert 0 < len(_got_n) < len(_FILTER_CODES), (len(_got_n), len(_FILTER_CODES))
+
+# DEFECT (finding #8): the boundary freezes "do not filter the council overlay",
+# but every deck check here read `layers[0]`, so a change that dropped overlay
+# records would pass.  Asserted on the SAME narrowed deck: the precinct layer
+# shrank and the district layer did not, and it still carries every record the
+# unfiltered render drew -- identified by layer id, not by index luck.
+_n_layers = json.loads(_seen_n[-1].to_json())["layers"]
+_f_layers = json.loads(_seen_n[0].to_json())["layers"]
+_n_precinct = next(l for l in _n_layers if l["id"] == settings.LAYER_ID)
+_n_council = next(l for l in _n_layers if l["id"] == settings.COUNCIL_LAYER_ID)
+_f_council = next(l for l in _f_layers if l["id"] == settings.COUNCIL_LAYER_ID)
+assert len(_n_precinct["data"]) == len(_got_n) < len(_FILTER_CODES)
+assert len(_f_council["data"]) > 0, "nothing to prove: the overlay drew no records"
+assert len(_n_council["data"]) == len(_f_council["data"]), (
+    f"the overlay was filtered: {len(_f_council['data'])} -> {len(_n_council['data'])}")
+assert [r.get(settings.DISTRICT_FIELD) for r in _n_council["data"]] == [
+    r.get(settings.DISTRICT_FIELD) for r in _f_council["data"]
+], "the overlay's districts changed under a precinct filter"
+# ...and the count is checked against what the selected districts SHOULD draw, not
+# only against the previous render: a truncation applied to both decks would leave
+# the two equal while quietly dropping boundaries from the map.
+_expected_district_records = data_layer.filter_district_records(
+    data_layer.council_district_records(_FILTER_COUNCIL["features"]),
+    settings.DEFAULT_DISTRICT_SELECTION,
+)
+assert len(_f_council["data"]) == len(_expected_district_records), (
+    len(_f_council["data"]), len(_expected_district_records))
+assert len(_n_council["data"]) == len(_expected_district_records), (
+    len(_n_council["data"]), len(_expected_district_records))
+ok("council overlay is not filtered while the precinct layer shrinks",
+   f"{len(_n_precinct['data'])} precincts / {len(_n_council['data'])} district records")
+# A blank on the NARROWED field is not drawn, and it is in this sample to be drawn
+# had it been inferred as a zero -- an empty intersection here would be vacuous.
+_blank_in_codes = [k for k in _FILTER_CODES if data_layer.to_float(index[k].get(_NARROW)) is None]
+assert _blank_in_codes, (_NARROW, _FILTER_CODES[:3])
+assert not (set(_blank_in_codes) & _got_n), sorted(set(_blank_in_codes) & _got_n)
+# A blank on an UNTOUCHED field still draws: `canvass_attempts` has a slider at its
+# full range here and 14 of this sample have no value for it, so an untouched
+# field hiding a blank would drop them -- which is exactly what "untouched = inert"
+# forbids.
+_untouched_blank_kept = [
+    k for k in _FILTER_CODES
+    if k in _got_n and data_layer.to_float(index[k].get("canvass_attempts")) is None
+]
+assert _untouched_blank_kept, "sample has no blank on an untouched field -- pick another"
+ok("AC2: one narrowed slider draws exactly the survivors, blanks dropped",
+   f"{len(_got_n)} of {len(_FILTER_CODES)} polygons, {len(_blank_in_codes)} blanks hidden")
+
+# AC3: narrowed, then reset.  The callback DELETES the f_* keys (it must not write
+# them -- a write into a live widget's key is the StreamlitValueAboveMaxError this
+# plan forbids), so the next render reads full ranges and hides nothing, with no
+# warning and no exception anywhere in the run.
+_seen_reset = []
+dashboard._cached_features = lambda *_a2, **_k2: _FILTER_FC
+dashboard._cached_council_features = lambda *_a2, **_k2: _FILTER_COUNCIL
+dashboard._cached_district_options = lambda *_a2, **_k2: _FILTER_COUNCIL
+dashboard.st.pydeck_chart = lambda d, *_a2, **_k2: _seen_reset.append(d)
+try:
+    _at_r = AppTest.from_string(_FILTER_SCRIPT)
+    _at_r.default_timeout = 180
+    _at_r.run()
+    _r_slider = _slider_for(_at_r, _NARROW)
+    _r_slider.set_value(_narrow_axis)
+    _at_r.run()
+    _r_button = [x for x in _at_r.sidebar.button if x.label == settings.FILTER_RESET_LABEL][0]
+    _r_button.click()
+    _at_r.run()
+finally:
+    (
+        dashboard._cached_features,
+        dashboard._cached_council_features,
+        dashboard._cached_district_options,
+        dashboard.st.pydeck_chart,
+    ) = _ORIG_FILTER
+assert not _at_r.exception, _at_r.exception
+assert not [w.value for w in _at_r.warning], [w.value for w in _at_r.warning]
+# Three renders: full, narrowed, reset.  The middle one has to have actually hid
+# something, or "reset restores everything" proves nothing about a filter that was
+# never in effect.
+assert len(_seen_reset) == 3, len(_seen_reset)
+assert _drawn(_seen_reset[0]) == len(_FILTER_FC["features"]), _drawn(_seen_reset[0])
+assert _drawn(_seen_reset[1]) < len(_FILTER_FC["features"]), _drawn(_seen_reset[1])
+# Compared on the AXIS, which is what the widget holds; the native bound is what
+# the mask holds.  Conflating them is what made this block's comparisons wrong.
+assert _close(_slider_for(_at_r, _NARROW).value[0], _na) and _close(
+    _slider_for(_at_r, _NARROW).value[1], _nb
+), _slider_for(_at_r, _NARROW).value
+assert all(
+    _close(_s.value[0], _AXIS[_k][0]) and _close(_s.value[1], _AXIS[_k][1])
+    for _k in filter_bounds
+    for _s in [_slider_for(_at_r, _k)]
+), "reset left a slider narrowed"
+assert _drawn(_seen_reset[-1]) == len(_FILTER_FC["features"]), _drawn(_seen_reset[-1])
+ok("AC3: reset restores full ranges and redraws every precinct, warning-free",
+   f"{_drawn(_seen_reset[-1])} records")
+
+# Matrix row STALE: a persisted value outside a field's bounds must be dropped
+# BEFORE that slider is created.  Without the drop the widget raises
+# StreamlitValueAboveMaxError (verified against this Streamlit version); with it
+# the slider simply shows the new full range.
+#
+# Seeds are AXIS values, because that is what session state holds for these
+# widgets.  Both sides of the staleness test get exercised: `current[1] > hi` via
+# a high above the axis bound, and `current[0] < lo` via a LOW under a bound whose
+# minimum is above zero.  `pct_vacant` and `canvass_attempts` both start at 0.0, so
+# seeding either one can never take the low branch -- the defect finding #3 names.
+# `2026_gov_percent_Hinojosa` starts at 0.156862 native / 15.686 on the axis, so a
+# persisted 2.0 there is genuinely below its own bound.
+_STALE_FIELD = "2026_gov_percent_Hinojosa"
+_stale_axis = _AXIS[_STALE_FIELD]
+assert _stale_axis[0] > 0.0, _stale_axis
+assert 2.0 < _stale_axis[0], (2.0, _stale_axis)
+_at_s, _decks_s = render_filters(seeded={
+    settings.FILTER_SESSION_PREFIX + "canvass_attempts": (0.0, 9_999_999.0),
+    settings.FILTER_SESSION_PREFIX + "pct_vacant": (99.0, 99.0),
+    settings.FILTER_SESSION_PREFIX + _STALE_FIELD: (2.0, 40.0),
+})
+assert not _at_s.exception, [str(e.value) for e in _at_s.exception]
+assert not [w.value for w in _at_s.warning], [w.value for w in _at_s.warning]
+for _f in ("canvass_attempts", "pct_vacant", _STALE_FIELD):
+    _s = _slider_for(_at_s, _f)
+    assert _close(_s.value[0], _AXIS[_f][0]) and _close(_s.value[1], _AXIS[_f][1]), (
+        _f, _s.value, _AXIS[_f])
+assert _drawn(_decks_s[0]) == len(_FILTER_FC["features"]), _drawn(_decks_s[0])
+ok("matrix STALE: out-of-bounds keys dropped on BOTH sides before the widget exists",
+   f"high on canvass_attempts/pct_vacant, low on {_STALE_FIELD} (axis lo {_stale_axis[0]:.3f})")
+
+# DEFECT 1 GUARD, second half: the staleness comparison must run on the axis.
+# A persisted NATIVE 0.4 for a share whose axis bound starts at 15.686 would, if
+# compared against native bounds, look "inside" and survive -- then the widget
+# would be created with 0.4 on a 15.6-100 axis and raise.  Proving the key is gone
+# is what makes this an assertion about `_forget_stale_range`'s units rather than
+# about Streamlit's tolerance for a bad default.
+_at_u, _decks_u = render_filters(seeded={
+    settings.FILTER_SESSION_PREFIX + _STALE_FIELD: (0.4, 1.0),
+})
+assert not _at_u.exception, [str(e.value) for e in _at_u.exception]
+assert _close(_slider_for(_at_u, _STALE_FIELD).value[0], _stale_axis[0]), (
+    _slider_for(_at_u, _STALE_FIELD).value, _stale_axis)
+ok("stale keys are judged against the axis bound, not the native one",
+   f"native (0.4,1.0) dropped against axis {_stale_axis[0]:.3f}..{_stale_axis[1]:.3f}")
+
+# Matrix row OFFLINE: a dead precinct endpoint keeps its single st.error and emits
+# zero filter widgets -- the error path returns before the second sidebar block, so
+# no council request and no slider goes out.
+def _offline():
+    def _boom(*_a2, **_k2):
+        raise RuntimeError("offline probe")
+
+    dashboard._cached_features = _boom
+    dashboard._cached_council_features = lambda *_a2, **_k2: _FILTER_COUNCIL
+    dashboard._cached_district_options = lambda *_a2, **_k2: _FILTER_COUNCIL
+    try:
+        _at_o = AppTest.from_string(_FILTER_SCRIPT)
+        _at_o.default_timeout = 180
+        _at_o.run()
+    finally:
+        (
+            dashboard._cached_features,
+            dashboard._cached_council_features,
+            dashboard._cached_district_options,
+        ) = _ORIG_FILTER[:3]
+    return _at_o
+
+
+_at_o = _offline()
+assert not _at_o.exception, _at_o.exception
+assert len(_at_o.error) == 1, [e.value for e in _at_o.error]
+assert "Could not load the precinct layer" in _at_o.error[0].value, _at_o.error[0].value
+assert not _at_o.sidebar.slider, len(_at_o.sidebar.slider)
+assert not _at_o.sidebar.expander, [e.label for e in _at_o.sidebar.expander]
+ok("matrix OFFLINE: one st.error, zero filter widgets, unchanged path")
+
 record = next(
     (r for r in rows if r["dallas_county_precinct_number"] == "1046"), rows[0]
 )
@@ -1772,6 +2658,48 @@ def stub_fc(precincts):
     return {"type": "FeatureCollection", "features": [feature(k) for k in precincts]}
 
 
+def clear_filter_state(at) -> None:
+    """Leave no narrowed filter behind in the AppTest that is about to be returned.
+
+    The filters are session-state widgets, so a run that narrowed one would
+    otherwise hand the next ~25 renders below the abort a map with polygons
+    missing -- and every one of those renders asserts on what the deck drew.
+
+    Why a restore and not a `del`: deleting a LIVE widget's key AFTER a run raises
+    `KeyError: st.session_state has no key "$$ID-...-f_x"` out of AppTest's own
+    widget-state serialisation, and several checks below do re-run the returned
+    object (`at6.selectbox[0].set_value(...)` then `at6.run()`).  So each key that
+    still owns a widget goes back to that widget's OWN default, read off its proto
+    rather than retyped here -- which is the full range, i.e. nothing hidden.  A key
+    with no widget behind it is deleted, since nothing re-reads it.
+
+    Why writing is acceptable HERE and forbidden in the app: this is a test-side-only
+    path.  `AppTest` hands out `_AppTestSessionState`, which bypasses the
+    already-instantiated guard that the app's own `SessionStateProxy` runs through
+    `SessionState.__setitem__` -- verified, a post-run write here neither warns nor
+    raises.  The shipped reset must still DELETE (see `ui.filter_reset`): the app has
+    no such bypass, and the plan forbids resetting by assignment.
+
+    The sweep is bounded to `filter_bounds`, the same set of fields the sliders were
+    built from, rather than to any key that happens to carry the `f_` prefix -- so a
+    stray or future `f_*` key belonging to something else is left alone.
+    """
+    try:
+        sliders = list(at.sidebar.slider)
+    except Exception:
+        return
+    by_field = {s.key: s for s in sliders if s.key}
+    for field in filter_bounds:
+        key = settings.FILTER_SESSION_PREFIX + field
+        if key not in at.session_state:
+            continue
+        widget = by_field.get(key)
+        if widget is not None:
+            at.session_state[key] = tuple(widget.proto.default)
+        else:
+            del at.session_state[key]
+
+
 def run_app(fc=None, selected=None, timeout=120):
     """Render main() with the layer, the overlay and the click under our control."""
     dashboard._cached_features = (
@@ -1803,6 +2731,7 @@ def run_app(fc=None, selected=None, timeout=120):
         dashboard._cached_council_features = ORIG_COUNCIL
         dashboard._cached_district_options = ORIG_OPTIONS
         dashboard.st.pydeck_chart = ORIG_PYDECK_CHART
+        clear_filter_state(at)
     assert not at.exception, f"app raised {at.exception[0].value if at.exception else ''}"
     return at
 

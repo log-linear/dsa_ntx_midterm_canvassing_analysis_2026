@@ -222,6 +222,233 @@ def build_deck(
     )
 
 
+# ---------------------------------------------------------------------------
+# The sidebar's range filters.
+#
+# One two-sided slider per field the extract can bound, each defaulting to that
+# field's own populated min/max so a fresh session hides nothing.  Which fields
+# get one is `data_layer.filter_bounds`'s answer, never a list maintained here.
+# ---------------------------------------------------------------------------
+
+
+def _span_divisor(span: int, target: int) -> int:
+    """The largest divisor of `span` at least 1 and at most `target`.
+
+    Used to pick an integer slider's step.  A step that does not DIVIDE the span
+    puts the far-right handle on `min + n*step`, which is short of the bound --
+    `canvass_attempts` 0-613 at step 6 lands on 612 -- so the populated maximum
+    is not a reachable position and a reader who never touches the widget appears
+    to have narrowed it.  613 is prime, which is exactly why the fallback matters:
+    the answer here is 1, not the nearest round number.
+    """
+    cap = max(1, min(int(target), int(span)))
+    for candidate in range(cap, 0, -1):
+        if span % candidate == 0:
+            return candidate
+    return 1
+
+
+def _slider_format(
+    field: str, bound: tuple[float, float], dictionary: dict, rows: list[dict[str, str]]
+) -> tuple:
+    """`(dtype, axis_lo, axis_hi, step, format, scale)` for one field's slider.
+
+    A share is drawn on a PERCENT-POINT axis: `st.slider` applies `format` as a
+    literal printf to the widget's own value, and shares are stored 0-1, so a 0-1
+    widget formatted "%.1f%%" renders `0.4%` where `legend_html` renders `40.0%`
+    -- the same field labelled two ways, 100x apart.  So a share's axis is
+    `lo*100`..`hi*100` with `scale` 100.0, and `filter_sliders` divides the value
+    back out.  The mask, `filter_bounds` and every comparison therefore stay in the
+    field's native unit; only the widget knows about the axis.
+
+    dtype is int when BOTH endpoints are integral AND every populated value is one,
+    for a NON-share field.  Endpoints alone cannot carry that decision: five share
+    fields legitimately span exactly 0.0-1.0 -- `pct_renter_occupied` among them,
+    with 798 of its 817 populated rows holding a fraction -- so an int slider there
+    would offer 0 and 1 only, and the only narrowing it could express would hide
+    every one of those 798.  That is the plan's own headline example made
+    unreachable, so the integrality test reads the field's VALUES, not its bounds.
+    An int step always divides the span (`_span_divisor`), so the bound is a
+    position the handle can actually reach; non-integer floats keep `span/100`.
+
+    `format` is always a printf string: it ships in a protobuf string field, so a
+    callable dies with TypeError (the `@@=` lesson of fc08df5, one layer up).  It
+    follows the axis -- "%.1f%%" on the percent-point axis, "%d" for integer-valued
+    fields, "%g" otherwise -- which is the same `domain_is_share` decision
+    `legend_html` makes, so slider and legend read alike.  `scale` is the only thing
+    that knows the axis exists: `filter_sliders` divides by it, so the field's
+    native unit is what the rest of the app ever sees.
+    """
+    lo, hi = bound
+    span = hi - lo
+    entry = dictionary.get(field) or {}
+    whole = lo == int(lo) and hi == int(hi) and all(
+        v == int(v) for v in (data_layer.to_float(r.get(field)) for r in rows) if v is not None
+    )
+    if data_layer.domain_is_share(bound):
+        axis_lo, axis_hi = lo * 100.0, hi * 100.0
+        return float, axis_lo, axis_hi, (axis_hi - axis_lo) / 100.0, "%.1f%%", 100.0
+    if whole:
+        return (
+            int,
+            int(lo),
+            int(hi),
+            _span_divisor(int(span), round(span / 100)),
+            "%d",
+            1.0,
+        )
+    fmt = "%d" if entry.get("data_type") == "integer" else "%g"
+    return float, float(lo), float(hi), span / 100.0, fmt, 1.0
+
+
+def _forget_stale_range(field: str, axis_bound: tuple[float, float]) -> None:
+    """Delete a persisted `f_<field>` value that no longer fits `axis_bound`.
+
+    Runs immediately BEFORE that field's `st.slider` is created, which is the
+    only order that works: a value outside the widget's min/max makes Streamlit
+    warn and then raise `StreamlitValueAboveMaxError`, so the stale key has to be
+    gone before the widget reads it.  Deleting rather than assigning is the same
+    rule reset follows -- you cannot write a value into a live widget's key -- and
+    it is what lets a rebuild that narrowed a domain fall back to the new full
+    range instead of crashing.
+
+    `axis_bound` is the bound ON THE WIDGET'S OWN AXIS, not the field's native
+    bound, because that is what session state holds.  Comparing a persisted axis
+    value against a native bound would be wrong in both directions for a share
+    field: a stale native 0.4 against an axis bound of 40.0 reads as "well inside"
+    and survives, and a legitimate axis 45.0 reads as "far outside" and is thrown
+    away.  `filter_sliders` scales before calling, so the two sides always match.
+
+    Bare-mode safe: with no run context the session-state proxy raises, and an
+    unkeyed widget has nothing persisted anyway, so this is a no-op there.
+    """
+    key = settings.FILTER_SESSION_PREFIX + field
+    try:
+        current = st.session_state.get(key)
+    except Exception:  # no runtime: nothing could have been persisted
+        return
+    if current is None:
+        return
+    lo, hi = axis_bound
+    try:
+        stale = current[0] < lo or current[1] > hi
+    except (TypeError, IndexError):
+        stale = True
+    if stale:
+        try:
+            del st.session_state[key]
+        except Exception:
+            pass
+
+
+def filter_reset() -> None:
+    """The reset button's callback: delete every `f_*` key, pre-run.
+
+    Callbacks run BEFORE the script, so on the next render each slider is created
+    with no persisted value and lands on its own full range.  Deletion is the
+    mechanism because of WHEN it happens: a pre-run write into a widget key is
+    accepted by Streamlit as long as the value is inside the range about to be
+    created, but the same write made after the widget exists is rejected outright
+    by the already-instantiated guard (`StreamlitWidgetAlreadyInstantiatedError`).
+    Deleting instead of assigning sidesteps both that guard and the
+    `StreamlitValueAboveMaxError` a stale pair would raise at widget creation, and
+    needs no copy of the current bounds to be held here.
+    """
+    for key in [k for k in st.session_state if str(k).startswith(settings.FILTER_SESSION_PREFIX)]:
+        del st.session_state[key]
+
+
+def filter_sliders(
+    rows: list[dict[str, str]],
+    bounds: dict[str, tuple[float, float]],
+    dictionary: dict[str, dict[str, str]],
+    on_reset=None,
+) -> dict[str, tuple[float, float]]:
+    """Drop one range slider per bounded field, plus the reset button.
+
+    For every field in `bounds`, in bounds order: a persisted value outside the
+    field's own bounds is deleted first, then the slider is created at its full
+    range.  Fields absent from `bounds` -- the all-blank ones and any
+    single-valued one -- get no widget at all, the same treatment
+    `detail_panel_fields` gives them, and nothing here explains the omission.
+    `rows` is the extract those bounds and dtypes are read against.
+
+    Labels come from `label_for`, so a raw field name never reaches the sidebar.
+    Keys are `FILTER_SESSION_PREFIX + field`, which is what lets reset clear the
+    filters as one namespace delete instead of a list of widget names maintained
+    in two places.
+
+    Returns each chosen range in the field's NATIVE unit: the pair comes back from
+    the widget on its own axis and is divided by `scale` here, so a share that the
+    reader set to 40-100 on a percent-point axis is handed to
+    `visible_precincts`/`filter_bounds` as 0.4-1.0.  Nothing downstream ever sees
+    the axis.  The division also means an int-dtype field's whole numbers arrive as
+    floats, which is what the float bounds are compared against.
+    """
+    ranges: dict[str, tuple[float, float]] = {}
+    for field, bound in bounds.items():
+        label = data_layer.label_for(dictionary, field)
+        dtype, lo, hi, step, fmt, scale = _slider_format(field, bound, dictionary, rows)
+        # Like with like: session state holds the AXIS value, so the staleness
+        # test has to run on the axis too, not on the native bound.
+        _forget_stale_range(field, (lo, hi))
+        chosen = st.slider(
+            label,
+            min_value=dtype(lo),
+            max_value=dtype(hi),
+            value=(dtype(lo), dtype(hi)),
+            step=dtype(step),
+            format=fmt,
+            key=settings.FILTER_SESSION_PREFIX + field,
+            help=label,
+        )
+        ranges[field] = (float(chosen[0]) / scale, float(chosen[1]) / scale)
+    if on_reset is not None:
+        st.button(settings.FILTER_RESET_LABEL, on_click=on_reset)
+    return ranges
+
+
+def visible_records(
+    records: list[dict[str, Any]], visible: set[str] | None
+) -> list[dict[str, Any]]:
+    """The deck records whose precinct survived the filters.
+
+    `visible` None is the untouched case, and the input list comes back as the
+    SAME object: no mask, no rebuild of the records, so a default load is
+    byte-identical to the one from before filters existed.  Otherwise a record
+    survives on its own `JOIN_LAYER_KEY` -- the precinct number `decorate`
+    already carries, so filtering never enters `decorate`'s colour/token contract
+    and hidden precincts keep their tooltip lines and their detail panels.
+
+    A record that cannot name its precinct is NOT visible: the mask is keyed on
+    that number, so a record which cannot state it has unprovable membership and is
+    dropped -- the same ruling the frozen matrix gives a polygon the crosswalk
+    cannot attribute, and the same one `layer_keys` and `decorate` already apply to
+    a missing join key.  A handful of property-less polygons therefore hides itself
+    instead of blanking every other precinct on the map.
+
+    What still fails loudly is the mis-wire: `visible` is a real set, records were
+    handed over, and NONE of them carries the key.  That is the wrong payload --
+    council records passed where precinct records belong -- and answering it with an
+    empty map would look like an over-strict filter rather than a bug.
+    """
+    if visible is None:
+        return records
+    nameable = sum(settings.JOIN_LAYER_KEY in r for r in records)
+    if records and not nameable:
+        raise ValueError(
+            f"no record handed to the filter mask carries {settings.JOIN_LAYER_KEY!r}: "
+            f"{len(records)} records of keys {sorted(records[0])[:6]}"
+        )
+    kept = []
+    for record in records:
+        if settings.JOIN_LAYER_KEY not in record:
+            continue
+        if str(record.get(settings.JOIN_LAYER_KEY, "")).strip() in visible:
+            kept.append(record)
+    return kept
+
+
 def selected_props(selection: Any) -> dict[str, Any] | None:
     """Clicked feature attributes, at .selection.objects[<layer_id>]."""
     inner = getattr(selection, "selection", None)

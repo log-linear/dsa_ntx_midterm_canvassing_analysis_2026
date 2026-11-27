@@ -133,6 +133,21 @@ def main() -> None:
         if district_options and not chosen_districts:
             st.caption(settings.DISTRICT_NONE_HINT)
 
+        # The range filters sit below the district menu in their own expander, so
+        # the widgets the suite asserts on above -- the colour selectbox and the
+        # district multiselect -- keep their order and nothing lands before
+        # "Colour precincts by".  `filter_sliders` owns the block: it drops each
+        # field's stale persisted value before creating that slider, renders one
+        # slider per field `filter_bounds` could bound, and closes with reset.
+        # Bounds come from the extract, so no range here is a typed-in 0-1 and the
+        # all-blank / single-valued fields simply get no widget.  The expander is
+        # what keeps 32 sliders off the sidebar's face by default.
+        bounds = data_layer.filter_bounds(rows)
+        with st.expander(settings.FILTER_EXPANDER_LABEL):
+            filter_ranges = ui.filter_sliders(
+                rows, bounds, dictionary, ui.filter_reset
+            )
+
     # Boundaries are fetched only for districts actually selected.  At the empty
     # default -- and whenever the option listing failed, since then nothing could
     # have been chosen -- no geometry request goes out at all, which is the same
@@ -159,11 +174,19 @@ def main() -> None:
             district_records = None
 
     fc = data_layer.decorate(features, rows, field)
+    # The mask is decided from the joined CSV and applied only to what the
+    # precinct layer draws: `decorate` never learns filtering exists, so colour,
+    # tooltip and both detail panels keep describing a hidden precinct.  None --
+    # every slider untouched -- means `visible_records` returns `fc` itself, so a
+    # default load hands the deck the identical list it always did.
+    # Bounds were read once for the sliders; the same object decides what is
+    # narrowed, so a slider's endpoints and the mask it feeds cannot disagree.
+    visible = data_layer.visible_precincts(rows, bounds, filter_ranges)
     stats = data_layer.join_precincts(features, rows)
     colored = sum(1 for record in fc if record["__color"] != settings.NO_DATA_COLOR)
 
     chart = st.pydeck_chart(
-        ui.build_deck(fc, tooltip, features, district_records),
+        ui.build_deck(ui.visible_records(fc, visible), tooltip, features, district_records),
         on_select="rerun",
         selection_mode="single-object",
         key="precinct_map",

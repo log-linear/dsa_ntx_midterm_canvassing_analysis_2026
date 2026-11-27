@@ -259,6 +259,112 @@ def field_domain(rows: list[dict[str, str]], field: str) -> tuple[float, float] 
     return domain_for([to_float(r.get(field)) for r in rows])
 
 
+# The fields a range filter can be offered for: CHOROPLETH + DETAIL + RESULTS,
+# de-duplicated with that precedence, so anything the reader can colour by or
+# read in a panel is also something they can filter on.  Built here rather than
+# in `settings` because it is a derived view of three lists, not a fourth list to
+# keep in step by hand; the membership that matters stays authored there.  Order
+# is user-visible -- it is the order the sliders are dropped in -- so the
+# de-duplication keeps first occurrence instead of sorting.
+FILTER_FIELDS = list(
+    dict.fromkeys(
+        settings.CHOROPLETH_FIELDS
+        + settings.DETAIL_FIELDS
+        + settings.RESULTS_PANEL_FIELDS
+    )
+)
+
+
+def filter_bounds(
+    rows: list[dict[str, str]], fields: list[str] | None = None
+) -> dict[str, tuple[float, float]]:
+    """`{field: (lo, hi)}` for the fields worth a slider, from the extract.
+
+    Only domains with `lo < hi` survive.  That one condition is what implements
+    both edge rows of the plan's matrix: a field blank across every row has no
+    domain at all (`field_domain` returns None), and a single-valued field has
+    `lo == hi`.  Either one handed to `st.slider` would raise
+    `StreamlitInvalidMinMaxError`, so the field simply gets no widget.  Nothing
+    here is a typed-in 0-1: `canvass_attempts` comes back 0-613, and a slider's
+    endpoints are always the field's own populated range.
+    """
+    fields = FILTER_FIELDS if fields is None else fields
+    bounds = {}
+    for f in fields:
+        domain = field_domain(rows, f)
+        if domain is not None and domain[0] < domain[1]:
+            bounds[f] = domain
+    return bounds
+
+
+def visible_precincts(
+    rows: list[dict[str, str]],
+    bounds: dict[str, tuple[float, float]],
+    ranges: dict[str, tuple[float, float]],
+) -> set[str] | None:
+    """The precinct numbers that survive every narrowed range, or None.
+
+    Returns **None** when nothing is narrowed.  That is not a micro-optimisation:
+    it is what lets the untouched default leave `decorate`'s output untouched, so a
+    fresh session draws the same 791 records it drew before filters existed instead
+    of a re-derived copy.
+
+    "Narrowed" is decided HERE, by a side sitting inside its bound by more than a
+    relative tolerance -- never by exact equality.  A slider cannot be trusted to
+    hand back its own endpoints verbatim: it reports `min + n*step` after a drag, so
+    where the step does not divide the span the far-right reading falls short of the
+    bound, and a share's percent-point axis is not bit-exact on the way back to the
+    field's native unit.  Either one read as a narrowing would hide precincts on a
+    slider the reader never touched, which the frozen default state forbids.
+
+    Otherwise the mask is built the same way the join is: one CSV row per
+    precinct, keyed on `JOIN_CSV_KEY`.  A precinct is kept only where its value
+    is non-None and falls inside the range for EVERY narrowed field, so blanks on
+    a narrowed field drop out (membership is unprovable, and a blank is never an
+    inferred zero) while blanks on an untouched field stay visible.  A polygon the
+    crosswalk cannot attribute has no row here at all, so it drops out of a
+    narrowed filter for the same reason: its value is unknown.
+    """
+    narrowed = {}
+    for f, chosen in ranges.items():
+        bound = bounds.get(f)
+        if bound is None:
+            continue
+        lo, hi = chosen
+        # "Narrowed" is measured with a RELATIVE TOLERANCE, not by equality.  Two
+        # reasons exact comparison is the wrong test: a slider reports
+        # `min + n*step` after a drag, so a step that does not divide the span
+        # cannot return the bound itself; and a share's axis round trip
+        # (`lo*100/100`) is not bit-exact.  Either one would make a widget the
+        # reader never touched look narrowed and hide precincts -- the frozen
+        # default state forbids that.  A side counts as moved only when it is
+        # inside its bound by more than a hair of the span.
+        tol = (bound[1] - bound[0]) * 1e-9
+        if lo > bound[0] + tol or hi < bound[1] - tol:
+            narrowed[f] = (lo, hi)
+    if not narrowed:
+        return None
+    keep = None
+    for f, (lo, hi) in narrowed.items():
+        # The SAME tolerance, applied to MEMBERSHIP and not only to the
+        # narrowed-side test above.  A handle's reading is never bit-exact with the
+        # value it points at: `pct_vacant`'s populated maximum comes back off the
+        # percent axis as 0.3964497041420118 where the field says
+        # 0.39644970414201186.  An exact `v <= hi` would then hide the sole holder
+        # of that maximum behind a right handle displaying the identical `39.6%` --
+        # a precinct disappearing on an endpoint the reader did not move.
+        tol = (bounds[f][1] - bounds[f][0]) * 1e-9
+        hits = {
+            r[settings.JOIN_CSV_KEY].strip()
+            for r in rows
+            if (r.get(settings.JOIN_CSV_KEY) or "").strip()
+            and (v := to_float(r.get(f))) is not None
+            and lo - tol <= v <= hi + tol
+        }
+        keep = hits if keep is None else keep & hits
+    return keep
+
+
 def decorate(
     features: list[dict[str, Any]], rows: list[dict[str, str]], field: str
 ) -> list[dict[str, Any]]:

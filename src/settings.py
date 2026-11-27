@@ -306,6 +306,29 @@ DISTRICT_NONE_HINT = "No districts selected -- no boundaries on the map."
 DEFAULT_DISTRICT_SELECTION = ["1", "2", "5", "9"]
 
 # ---------------------------------------------------------------------------
+# The sidebar's range filters.  Three chrome strings and nothing else: which
+# fields get a slider is derived from the extract (`filter_bounds` drops the
+# fields whose populated min equals its max), and each slider's endpoints come
+# from `field_domain`, so there is no range list here to keep in step with the
+# data.  A field with no bounds simply gets no widget -- the same rule
+# `detail_panel_fields` applies to NO_DATA_FIELDS -- and no caption says so.
+#
+# FILTER_SESSION_PREFIX is the whole session-state namespace for the filters,
+# which is what makes "reset" a delete rather than an assignment: writing a
+# value into a widget's key is what raises StreamlitValueAboveMaxError when the
+# persisted value falls outside a range a rebuild has since narrowed.  What the
+# prefix has to keep clear is the FILTER keys: prefix + field name is one-to-one
+# over `filter_bounds`, and each field appears once in FILTER_FIELDS, so no two
+# sliders can share a key and the per-field staleness drop only ever touches
+# keys `filter_bounds` emitted.  The app does key other widgets -- the chart is
+# `precinct_map` -- and none of them starts with this prefix, which is what keeps
+# the reset sweep off them.
+# ---------------------------------------------------------------------------
+FILTER_EXPANDER_LABEL = "Filter precincts"
+FILTER_RESET_LABEL = "Click here to reset filters"
+FILTER_SESSION_PREFIX = "f_"
+
+# ---------------------------------------------------------------------------
 # Colour legend geometry.  The swatch colours are NOT here on purpose: they come
 # out of `color_scale`/`ramp_rgb`, so the legend cannot drift from the map --
 # change VIRIDIS_STOPS or FILL_ALPHA and the two move together.  Only the pixel
