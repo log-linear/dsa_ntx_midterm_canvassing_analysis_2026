@@ -105,8 +105,11 @@ def format_value(value: float | None, fraction: bool = True) -> str:
     """
     if value is None:
         return settings.NO_DATA_TEXT
-    if fraction and 0.0 <= value <= 1.0:
-        return f"{value * 100:.1f}%"
+    if fraction and -settings.SHARE_TOLERANCE <= value <= 1.0 + settings.SHARE_TOLERANCE:
+        # Clamped before scaling: 1.0000000000000002 must not print as "100.0%" by
+        # accident of rounding while sitting outside the band it is being clamped
+        # from, and a value this far out cannot mean anything but 100%.
+        return f"{max(0.0, min(1.0, value)) * 100:.1f}%"
     return f"{value:,.4g}"
 
 
@@ -117,8 +120,17 @@ def domain_is_share(domain: tuple[float, float] | None) -> bool:
     Decided once per field from the whole extract, never per value: guessing it
     from magnitude made `canvass_attempts` print "0.0%" for zero attempts and
     "100.0%" for one while 113 stayed "113", three readings for one column.
+
+    `SHARE_TOLERANCE` keeps a sum-of-quotients artifact from flipping a whole
+    field's axis: `pct_single_unit`'s populated maximum is 1.0000000000000002, and
+    an exact `<= 1.0` here reads that as a count, which is what made the legend,
+    the detail panel and the filter slider all label one column two ways.
     """
-    return domain is not None and domain[0] >= 0.0 and domain[1] <= 1.0
+    return (
+        domain is not None
+        and domain[0] >= -settings.SHARE_TOLERANCE
+        and domain[1] <= 1.0 + settings.SHARE_TOLERANCE
+    )
 
 
 def domain_for(values: list[float | None]) -> tuple[float, float] | None:

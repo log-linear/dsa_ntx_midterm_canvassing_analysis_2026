@@ -204,6 +204,28 @@ routed `defer` and written to `deferred-work.md`: the uncached `load_rows()` CSV
 at `6397d65`, cost measured negligible at 820 rows) and the below-abort renders' exposure to 33 new
 sidebar elements (unsettled while the `TOOLTIP_FIELDS` abort stands, which this plan freezes).
 
+## Implementation Notes (post-build, added during the walkthrough)
+
+Stop 2 of the `df5e238` walkthrough surfaced a **pre-existing** classification defect that the new
+slider made visible rather than caused: 3 rows of `data/precinct_data.csv` carry
+`pct_single_unit` = `1.0000000000000002`, a sum-of-quotients artifact `2.22e-16` above 1.0, and
+`domain_is_share`'s exact `domain[1] <= 1.0` put the whole column on the count axis. The legend read
+`0`/`1`, the detail panel read `1`, and the slider spanned `0`/`1.0000000000000002` on `%g` — while
+its complement `pct_multi_unit`, which tops out at exactly 1.0, read `0.0%`/`100.0%`. One housing
+table, two units.
+
+Fixed with a named tolerance (`settings.SHARE_TOLERANCE = 1e-12`) applied at BOTH places that decide
+share-vs-count — `domain_is_share` for the field, `format_value` for the value, clamped before
+scaling since `-1e-13` otherwise reaches the UI as `-0.0%` — rather than a special case for one
+field, so the next artifact cannot re-arm the same trap. `data/` was not edited: the value arrives
+already-artifacted from the DFS export, and the classification layer is where all four surfaces read.
+
+Suite 55 → **58 PASS**, no name lost. Three new checks, each mutation-tested: the axis decision is
+re-derived from the raw CSV **text** (replacing `assert _share_seen == 28`, a typed-in count that
+stayed green through the actual defect); the emitted `pct_single_unit` widget reads `0.0%`/`100.0%`;
+and the tolerance's *magnitude* is pinned on synthetic domains, because no field in this extract
+sits between `1e-12` and `1.01`, so nothing else would notice an over-wide band being opened.
+
 ## Plan Change Log
 
 ### Loopback 1 — 2026-11-27, triggered by review pass 1 findings #1 and #2 (both `high`)

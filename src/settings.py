@@ -240,6 +240,22 @@ COLOR_LOW = VIRIDIS_STOPS[0][1]
 COLOR_HIGH = VIRIDIS_STOPS[-1][1]
 
 NO_DATA_TEXT = "\u2014"  # em-dash: no value, distinct from 0.0
+
+# How far outside 0-1 a share may sit and still be treated as one.  ACS ratios are
+# sums of quotients, so a column that is 100% somewhere can arrive as
+# 1.0000000000000002 -- `pct_single_unit` does, in 3 rows of data/precinct_data.csv,
+# while its complement `pct_multi_unit` tops out at exactly 1.0.  Read as a count,
+# that hair puts the field on the wrong axis everywhere at once: the legend prints
+# "1", the detail panel prints "1", and the filter slider spans 0-1 on a %g axis
+# instead of 0%-100%.  One column telling three stories is the defect
+# `format_value`'s docstring already records, so the tolerance is applied at BOTH
+# places that decide it -- `domain_is_share` for the field, `format_value` for the
+# value -- and never by naming the field or editing the CSV.
+#
+# It is deliberately a float hair, not a band: `canvass_attempts` tops out at 613
+# and `response_count` at 135, and both must stay counts.  Raising this toward even
+# 0.01 would make a genuine 1.5 figure read as 150%.
+SHARE_TOLERANCE = 1e-12
 MAP_STYLE_URL = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
 LAYER_ID = "precincts"  # Layer(id=...) is required or selection state is unkeyed
 CACHE_TTL = 900  # seconds; the geometry is "Current" and reflows rarely

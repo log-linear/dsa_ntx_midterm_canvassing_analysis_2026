@@ -901,7 +901,65 @@ for _f, (_lo, _hi) in sorted(filter_bounds.items()):
     assert _fmt % _ahi == data_layer.format_value(_hi, True), (
         _f, _fmt % _ahi, data_layer.format_value(_hi, True))
     _share_seen += 1
-assert _share_seen == 28, _share_seen
+# The expected share set is derived from the raw CSV TEXT, not from
+# `domain_is_share`: asserting a remembered count (it was 28) is a typed-in number
+# that a legitimate reclassification breaks, and -- worse -- it stayed green through
+# the real defect, because `pct_single_unit` was on the count axis for a float hair
+# and no check asked whether the axis matched the data.  Reading the column as text
+# is a genuinely different code path from `field_domain`/`domain_is_share`, in the
+# same spirit as `_populated_range`.  The 1e-12 hair is spelled as a literal here so
+# a change to `settings.SHARE_TOLERANCE` shows up as disagreement, not agreement.
+_expected_shares = set()
+for _f in data_layer.FILTER_FIELDS:
+    _txt = [
+        (r.get(_f) or "").strip() for r in rows if (r.get(_f) or "").strip()
+    ]
+    if not _txt:
+        continue
+    _nums = [float(t) for t in _txt]
+    if all(-1e-12 <= n <= 1.0 + 1e-12 for n in _nums):
+        _expected_shares.add(_f)
+_derived = {f for f, (lo, hi) in filter_bounds.items() if data_layer.domain_is_share((lo, hi))}
+assert _derived == _expected_shares & set(filter_bounds), (
+    "axis disagrees with the raw column text:",
+    sorted(_derived ^ (_expected_shares & set(filter_bounds))))
+assert _share_seen == len(_expected_shares & set(filter_bounds)) > 0, (
+    _share_seen, len(_expected_shares & set(filter_bounds)))
+ok("share-vs-count axis agrees with the raw CSV text",
+   f"{_share_seen} of {len(filter_bounds)} bounded fields are shares")
+
+# The field that started this: `pct_single_unit` carries 1.0000000000000002 in 3
+# rows, which an exact `<= 1.0` read as a count and put the whole column on the
+# wrong axis -- legend "1", detail panel "1", slider 0-1 on %g.  Asserted on the
+# EMITTED widget, since that is what the browser read wrong.
+_psu = _slider_for(_at_f, "pct_single_unit")
+assert _psu.proto.format == "%.1f%%", _psu.proto.format
+assert _psu.proto.format % _psu.min == "0.0%", _psu.min
+assert _psu.proto.format % _psu.max == "100.0%", _psu.max
+assert data_layer.format_value(1.0000000000000002, True) == "100.0%", (
+    "the artifact value must not print as a raw 1")
+# And the counts must NOT have been dragged across by the tolerance.
+for _cnt in ("canvass_attempts", "strong_no", "response_count"):
+    assert not data_layer.domain_is_share(filter_bounds[_cnt]), _cnt
+    assert data_layer.format_value(filter_bounds[_cnt][1], False) != "100.0%", _cnt
+ok("a float artifact in a share's maximum keeps it on the percent axis",
+   "pct_single_unit 0.0%-100.0%; 3 count fields still counts")
+
+# The tolerance's MAGNITUDE, pinned on synthetic domains rather than on this
+# extract: no field here sits between 1e-12 and, say, 1.01, so the raw-text
+# cross-check above cannot see an over-wide band being opened.  A band wide enough
+# to call a real 1.001 figure a share would print it as "100.1%" from a 0-100 axis
+# while the underlying number means something else entirely.
+assert data_layer.domain_is_share((0.0, 1.0 + 1e-13)), "hair inside the band rejected"
+assert data_layer.domain_is_share((-1e-13, 1.0)), "negative hair rejected"
+assert not data_layer.domain_is_share((0.0, 1.001)), "band is wide enough to swallow 1.001"
+assert not data_layer.domain_is_share((-0.001, 1.0)), "band is wide enough on the low side"
+assert not data_layer.domain_is_share(None)
+# The clamp is load-bearing on the LOW side: an artifact reading -1e-13 must not
+# reach the UI as negative zero.
+assert data_layer.format_value(-1e-13, True) == "0.0%", data_layer.format_value(-1e-13, True)
+assert data_layer.format_value(-0.5, True) == "-0.5", "a real negative is not clamped away"
+ok("share tolerance is a float hair, not a band", "1e-13 in, 1.001 out, -0.0% clamped")
 # A mid-axis position has to read right too, not just the two ends the widget
 # ships by default: 40 on the percent axis is 0.4 native is "40.0%" -- the plan's
 # headline query, rendered.  Format string taken from the emitted widget rather
