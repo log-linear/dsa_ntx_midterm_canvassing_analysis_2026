@@ -395,6 +395,11 @@ def filter_sliders(
 ) -> dict[str, tuple[float, float]]:
     """Drop one range slider per bounded field, plus the reset button.
 
+    The reset button is emitted FIRST, so it leads the expander and is reachable
+    without scrolling past the slider list.  Position carries no behaviour here:
+    `on_click` callbacks run before the script, so the `f_*` keys are already gone by
+    the time any slider in the loop is created.
+
     For every field in `bounds`, in bounds order: a persisted value outside the
     field's own bounds is deleted first, then the slider is created at its full
     range.  Fields absent from `bounds` -- the all-blank ones and any
@@ -415,6 +420,8 @@ def filter_sliders(
     floats, which is what the float bounds are compared against.
     """
     ranges: dict[str, tuple[float, float]] = {}
+    if on_reset is not None:  # first child of the expander; see the docstring
+        st.button(settings.FILTER_RESET_LABEL, on_click=on_reset)
     for field, bound in bounds.items():
         label = data_layer.label_for(dictionary, field)
         dtype, lo, hi, step, fmt, scale = _slider_format(field, bound, dictionary, rows)
@@ -432,8 +439,6 @@ def filter_sliders(
             help=label,
         )
         ranges[field] = (float(chosen[0]) / scale, float(chosen[1]) / scale)
-    if on_reset is not None:
-        st.button(settings.FILTER_RESET_LABEL, on_click=on_reset)
     return ranges
 
 

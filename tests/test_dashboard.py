@@ -908,6 +908,20 @@ ok("the expander's OWN subtree holds all 32 sliders and the reset button",
    f"{len(_expander_f.slider)} sliders + {len(_expander_f.button)} button inside "
    f"{settings.FILTER_EXPANDER_LABEL!r}")
 
+# POSITION WITHIN the block: the reset button leads the expander, above all 32 sliders,
+# so the way out is reachable without scrolling past the whole list.  Nothing above can
+# see this -- `at.sidebar` flattens descendants in paint order, so every containment and
+# count assertion holds whether the button leads or trails, and a single button is one
+# button either way.  `Block.__iter__` yields the node ITSELF before its children (verified
+# against this Streamlit build), so the expander is dropped before the order is read;
+# moving the `st.button` call back below the slider loop fails here.
+_kids = [c.type for c in _expander_f if c is not _expander_f]
+assert _kids[0] == "button", f"reset button is not the expander's first child: {_kids[:3]}"
+assert _kids[1:] == ["slider"] * len(filter_bounds), _kids[:4]
+assert _expander_f.button[0].label == settings.FILTER_RESET_LABEL, _expander_f.button[0].label
+ok("the reset button leads the expander, above all 32 sliders",
+   f"children: {_kids[0]} then {len(_kids) - 1} sliders")
+
 # Every slider is created at its own full range, expressed ON THE WIDGET'S AXIS:
 # a share spans whole percentage points, a count spans its own native numbers.
 # `_slider_format`'s scale is what maps one to the other, so the axis endpoints are

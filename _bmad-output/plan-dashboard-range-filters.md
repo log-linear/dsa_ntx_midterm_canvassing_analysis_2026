@@ -103,14 +103,16 @@ Settled at Checkpoint 1 (2026-11-26).
   `JOIN_CSV_KEY` whose value is non-None and within its range for every narrowed field.
 - [ ] `src/utils/streamlit.py` — `_slider_format(field, bound, dictionary, rows)` returns
   `(dtype, axis_lo, axis_hi, step, fmt, scale)` where `scale` is 100.0 for a share field and 1.0
-  otherwise: shares go on a 0-100 percent-point axis with `"%.1f%%"`, integer-valued fields go int
-  with a step that **divides the span**, everything else float `%g` at `span/100`.
-  `filter_sliders(rows, bounds, dictionary, on_reset)`: per bounded field drop a stale `f_*` key
-  outside `bounds` **before** the call, render `st.slider(label, axis_lo, axis_hi, (axis_lo,
-  axis_hi), step, format=fmt, key=PREFIX+field, help=label)`, then divide the returned pair by
-  `scale` so callers keep the field's native unit. Plus `visible_records(records, visible)` →
-  `records` unchanged when `visible` is None, else those whose `JOIN_LAYER_KEY` is in `visible`,
-  raising `ValueError` if any record lacks that key.
+  otherwise: shares go on a whole percent-point axis — `floor(lo*100)`…`ceil(hi*100)` clamped
+  0-100, int, step 1, `"%d%%"` (see Loopback 2) — integer-valued fields go int with a step that
+  **divides the span**, everything else float `%g` at `span/100`.
+  `filter_sliders(rows, bounds, dictionary, on_reset)`: emit `st.button` **first** (see Loopback 3),
+  then per bounded field drop a stale `f_*` key outside the field's axis bound — including a
+  non-integral pair on an integral axis — **before** the call, render `st.slider(label, axis_lo,
+  axis_hi, (axis_lo, axis_hi), step, format=fmt, key=PREFIX+field, help=label)`, then divide the
+  returned pair by `scale` so callers keep the field's native unit. Plus `visible_records(records,
+  visible)` → `records` unchanged when `visible` is None, else those whose `JOIN_LAYER_KEY` is in
+  `visible`, hiding a record that cannot name itself and raising only if none can.
 - [ ] `src/dashboard.py` — in the second sidebar block after the district multiselect, render
   the expander + `st.button(settings.FILTER_RESET_LABEL, on_click=on_reset)`; apply
   `ui.visible_records(fc, visible)` at the `build_deck` call only.
@@ -237,6 +239,21 @@ and the tolerance's *magnitude* is pinned on synthetic domains, because no field
 sits between `1e-12` and `1.01`, so nothing else would notice an over-wide band being opened.
 
 ## Plan Change Log
+
+### Loopback 3 — 2026-11-27, user request (UI position only)
+
+**Changed:** the reset button is emitted before the slider loop, so it leads the
+expander instead of trailing 32 sliders.
+
+No behaviour rides on it — `on_click` callbacks run before the script, so `filter_reset`
+has already deleted the `f_*` keys by the time the first slider in the loop is created,
+which is why AC3 stays green from either position. Nothing in the frozen block is touched
+(still exactly one button, still inside the expander, no new caption/selectbox/multiselect/
+html). Pass-2 finding #8 is what makes this provable at all: the containment assertions it
+added walk the expander's own subtree, but they count rather than order, so a new check
+reads `[c.type for c in expander if c is not expander]` and requires `button` first —
+verified to fail with `['slider', 'slider', 'slider']` when the button is moved back.
+Suite 62 → **63 PASS**.
 
 ### Loopback 2 — 2026-11-27, user request after `df5e238`/`545a5b7`
 
