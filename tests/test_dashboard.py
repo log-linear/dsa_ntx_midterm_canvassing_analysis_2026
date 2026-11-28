@@ -1400,6 +1400,44 @@ assert _drawn(_seen_reset[-1]) == len(_FILTER_FC["features"]), _drawn(_seen_rese
 ok("AC3: reset restores full ranges and redraws every precinct, warning-free",
    f"{_drawn(_seen_reset[-1])} records")
 
+# THE THUMB, not just the map.  Everything above asserts what the SERVER computed, and
+# all of it stayed green while the browser kept showing the narrowed handles -- because
+# `at.sidebar.slider[i].value` reads the outgoing proto's `value` field, which is filled
+# from `widget_state.value` whether or not the client is told to adopt it.  The field the
+# frontend gates on is `set_value`: Slider.tsx's sync effect in useBasicWidgetState
+# returns early `if (!element.setValue) return`, and the element id is computed from
+# key+min+max+step only (`key_as_main_identity`), so a reset that deletes the key leaves
+# the id UNCHANGED -- the mounted React component keeps its local `uiValue`.  Result: the
+# map resets, the thumbs do not, and the next interaction re-sends the stale pair and
+# resurrects the filter (both reproduced against this Streamlit build).
+#
+# `is_new_state_value(user_key)` is the branch that sets the flag, so the key has to be
+# REWRITTEN by the time the slider is created, not merely absent -- hence the `setdefault`
+# seed in `filter_sliders`.  Asserted across ALL 32: the seed must reach every slider after
+# a reset, since the reader may have moved any number of them.
+for _f in filter_bounds:
+    _post = _slider_for(_at_r, _f)
+    assert _post.proto.set_value, (
+        f"{_f}: after reset the proto carries the full range ({tuple(_post.value)}) but "
+        f"set_value is False, so the browser keeps the thumb where the reader left it")
+# And a plain drag must NOT flip it: the client already holds that value, so pushing it
+# back would be a round trip that can fight an in-progress drag.  This is what keeps the
+# fix from becoming "always set_value", which would make the seed a lie on every rerun.
+_at_dr = AppTest.from_string(_FILTER_SCRIPT)
+_at_dr.default_timeout = 180
+_at_dr.run()
+_drag = _slider_for(_at_dr, _NARROW)
+_drag.set_value(_narrow_axis)
+_at_dr.run()
+_dported = _slider_for(_at_dr, _NARROW)
+assert not _dported.proto.set_value, (
+    f"a drag sets set_value={_dported.proto.set_value}; the seed must be a no-op once the "
+    f"key exists, or it fights the reader's own value")
+assert _close(_dported.value[0], _narrow_axis[0]) and _close(
+    _dported.value[1], _narrow_axis[1]), _dported.value
+ok("reset flips set_value so the browser moves the thumbs; a drag does not",
+   f"all {len(filter_bounds)} sliders set_value=True after reset, drag leaves it False")
+
 # Matrix row STALE: a persisted value outside a field's bounds must be dropped
 # BEFORE that slider is created.  Without the drop the widget raises
 # StreamlitValueAboveMaxError (verified against this Streamlit version); with it
@@ -2881,12 +2919,15 @@ def clear_filter_state(at) -> None:
     rather than retyped here -- which is the full range, i.e. nothing hidden.  A key
     with no widget behind it is deleted, since nothing re-reads it.
 
-    Why writing is acceptable HERE and forbidden in the app: this is a test-side-only
-    path.  `AppTest` hands out `_AppTestSessionState`, which bypasses the
+    Why writing is acceptable HERE and not from a callback in the app: this is a
+    test-side-only path.  `AppTest` hands out `_AppTestSessionState`, which bypasses the
     already-instantiated guard that the app's own `SessionStateProxy` runs through
     `SessionState.__setitem__` -- verified, a post-run write here neither warns nor
-    raises.  The shipped reset must still DELETE (see `ui.filter_reset`): the app has
-    no such bypass, and the plan forbids resetting by assignment.
+    raises.  The shipped reset callback still DELETES (see `ui.filter_reset`), because a
+    callback that wrote a value the reader had just narrowed would be assigning to a key
+    whose widget exists; what `filter_sliders` then does is seed the full range via
+    `setdefault` at creation time, which is what flips proto `set_value` so the browser
+    moves the thumbs (see loopback 4 and the `set_value` check above AC3).
 
     The sweep is bounded to `filter_bounds`, the same set of fields the sliders were
     built from, rather than to any key that happens to carry the `f_` prefix -- so a

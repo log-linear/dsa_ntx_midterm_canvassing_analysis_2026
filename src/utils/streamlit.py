@@ -374,14 +374,23 @@ def filter_reset() -> None:
     """The reset button's callback: delete every `f_*` key, pre-run.
 
     Callbacks run BEFORE the script, so on the next render each slider is created
-    with no persisted value and lands on its own full range.  Deletion is the
-    mechanism because of WHEN it happens: a pre-run write into a widget key is
-    accepted by Streamlit as long as the value is inside the range about to be
-    created, but the same write made after the widget exists is rejected outright
-    by the already-instantiated guard (`StreamlitWidgetAlreadyInstantiatedError`).
-    Deleting instead of assigning sidesteps both that guard and the
-    `StreamlitValueAboveMaxError` a stale pair would raise at widget creation, and
-    needs no copy of the current bounds to be held here.
+    with no persisted value.  Deletion is the mechanism because of WHEN it happens:
+    a write made after the widget exists is rejected outright by the
+    already-instantiated guard (`StreamlitWidgetAlreadyInstantiatedError`), and
+    `StreamlitValueAboveMaxError` is what a persisted value OUTSIDE a shrunk range
+    raises at widget creation.  Deleting sidesteps both and needs no copy of the
+    current bounds to be held here.
+
+    Deletion alone does not reset the SLIDER THUMB, though -- only the map.  The
+    browser keeps its own copy of every widget's value (`WidgetStateManager`), keyed
+    on the element id, and deleting a server-side key leaves that id in place, so the
+    client still holds the narrowed pair.  What tells the client otherwise is the
+    proto's `set_value` event flag, which the backend sets only when
+    `is_new_state_value(key)` or one of its restore branches fires
+    (`SessionState._get_widget_state`) -- and a deletion is none of those.  So
+    `filter_sliders` seeds the default back with `setdefault`, which IS a new state
+    value on the run that follows a reset, and the thumb follows the map.  See
+    `filter_sliders` for that half.
     """
     for key in [k for k in st.session_state if str(k).startswith(settings.FILTER_SESSION_PREFIX)]:
         del st.session_state[key]
@@ -428,14 +437,35 @@ def filter_sliders(
         # Like with like: session state holds the AXIS value, so the staleness
         # test has to run on the axis too, not on the native bound.
         _forget_stale_range(field, (lo, hi), dtype is int)
+        # Seed the full range into session state, then let the widget read it by
+        # passing `value=None`.  Two reasons both halves matter:
+        #   * `setdefault` is a no-op once the reader has touched the slider (the
+        #     key already exists), so a drag is never overwritten; it only fills the
+        #     hole a reset or a stale-drop just left.
+        #   * filling it that way makes the key a NEW state value, which is what
+        #     raises `set_value` on the outgoing proto -- and `set_value` is the only
+        #     thing the browser's Slider honours for an already-mounted widget.  With
+        #     an explicit `value=(lo, hi)` instead, a reset moves the map but leaves
+        #     every thumb where the reader put it.
+        # `value=None` also sidesteps the duplicate-default warning, since the policy
+        # check only fires when an explicit default is passed alongside a new
+        # session-state value.
+        #
+        # SEED AFTER `_forget_stale_range`, not before: with `value=None` the widget
+        # infers single-vs-range from whatever the key holds, so seeding first lets a
+        # stale pair occupy the key, get deleted below it, and leave nothing to read --
+        # Streamlit then builds a SINGLE slider and `chosen[0]` dies with
+        # `'int' object is not subscriptable`.
+        key = settings.FILTER_SESSION_PREFIX + field
+        st.session_state.setdefault(key, (dtype(lo), dtype(hi)))
         chosen = st.slider(
             label,
             min_value=dtype(lo),
             max_value=dtype(hi),
-            value=(dtype(lo), dtype(hi)),
+            value=None,
             step=dtype(step),
             format=fmt,
-            key=settings.FILTER_SESSION_PREFIX + field,
+            key=key,
             help=label,
         )
         ranges[field] = (float(chosen[0]) / scale, float(chosen[1]) / scale)

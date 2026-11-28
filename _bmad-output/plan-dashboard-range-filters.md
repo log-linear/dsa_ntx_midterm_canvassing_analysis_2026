@@ -108,9 +108,11 @@ Settled at Checkpoint 1 (2026-11-26).
   **divides the span**, everything else float `%g` at `span/100`.
   `filter_sliders(rows, bounds, dictionary, on_reset)`: emit `st.button` **first** (see Loopback 3),
   then per bounded field drop a stale `f_*` key outside the field's axis bound — including a
-  non-integral pair on an integral axis — **before** the call, render `st.slider(label, axis_lo,
-  axis_hi, (axis_lo, axis_hi), step, format=fmt, key=PREFIX+field, help=label)`, then divide the
-  returned pair by `scale` so callers keep the field's native unit. Plus `visible_records(records,
+  non-integral pair on an integral axis — **before** the call, seed the full axis range with
+  `session_state.setdefault(PREFIX+field, (lo, hi))` and render `st.slider(label, axis_lo, axis_hi,
+  None, step, format=fmt, key=PREFIX+field, help=label)` — the seed, not an explicit `value`, is what
+  sets proto `set_value` so the browser moves the thumb (see Loopback 4); then divide the returned
+  pair by `scale` so callers keep the field's native unit. Plus `visible_records(records,
   visible)` → `records` unchanged when `visible` is None, else those whose `JOIN_LAYER_KEY` is in
   `visible`, hiding a record that cannot name itself and raising only if none can.
 - [ ] `src/dashboard.py` — in the second sidebar block after the district multiselect, render
@@ -239,6 +241,54 @@ and the tolerance's *magnitude* is pinned on synthetic domains, because no field
 sits between `1e-12` and `1.01`, so nothing else would notice an over-wide band being opened.
 
 ## Plan Change Log
+
+### Loopback 4 — 2026-11-27, user-reported bug: reset moved the map but not the thumbs
+
+**Bug:** clicking reset filtered the map correctly while every slider kept the position the
+reader had dragged it to. **Pre-existing since the feature shipped** — reproduced with
+`set_value=False` after reset at `df5e238` (the first filter commit), `0a95c6b` and `545a5b7`, all
+with the button at the bottom. Loopback 3's move did not cause it.
+
+**Mechanism** (read out of this Streamlit build, 1.67.0, not reasoned from the diff): the browser
+keeps its own copy of each widget's value in `WidgetStateManager`, keyed on the element id. The
+id is computed from key + `min_value`/`max_value`/`step` only (`key_as_main_identity`), so a reset
+that deletes the `f_*` keys leaves every id unchanged and the mounted component keeps its local
+`uiValue`. The only thing that pushes a server value into an already-mounted slider is the proto's
+`set_value` flag — `useBasicWidgetState` returns early on `if (!element.setValue) return`, and
+`Slider.tsx`'s `useEffect(..., [value])` then re-syncs `uiValue`. `set_value` is set from
+`widget_state.value_changed`, whose branches all require the key to be a **new state value**
+(`is_new_state_value(user_key)`); a deletion is none of them. So the backend recomputed full ranges
+into `proto.value` and the client ignored it. Worse: on the next interaction the client re-sends the
+stale pair, which the backend honours, so a filter the reader thought they cleared comes back.
+
+**Fix:** `filter_sliders` seeds `(lo, hi)` with `st.session_state.setdefault(key, ...)` and passes
+`value=None`, so the key IS a new state value on the post-reset run → `set_value` True → the thumbs
+follow. `setdefault` is a no-op while the key exists, so a drag is never overwritten and
+`set_value` stays False for a plain drag (asserted). The seed runs **after** `_forget_stale_range`:
+with `value=None` the widget infers single-vs-range from the key, so seeding first lets a stale pair
+occupy it, get deleted, and leave Streamlit building a single slider — `chosen[0]` then dies with
+`'int' object is not subscriptable` (mutation-tested).
+
+**Freezes amended — needs human acknowledgement:**
+- `## Boundaries & Constraints` → "Do not reset by *writing* values into session state … Delete keys
+  instead." `filter_reset` still deletes; nothing writes a *stale* value. But the reset's visible
+  effect now depends on a write of the *default*, which the sentence as written forbids. The stated
+  reason for the rule — `StreamlitValueAboveMaxError` from a persisted value outside a new range — is
+  untouched and still handled by `_forget_stale_range`. Deletion alone cannot fix this bug; the
+  `set_value` contract requires the key to be newly written.
+- The duplication warning the rule also cites is sidestepped rather than suppressed: with
+  `value=None` there is no explicit default, and `check_session_state_rules` only warns when one is
+  passed alongside a new state value.
+
+**Why AC3 stayed green:** every existing check reads `widget.value` / `proto.value`, i.e. what the
+server computed. None read `proto.set_value`, the field the browser actually gates on — the same
+class as the `fc08df5`/`7af094d` lesson in `AGENTS.md`: assert the rendered payload *and the channel*.
+New check asserts `set_value` True for all 32 after a reset and False after a drag. 64 PASS, up from
+63; baseline differential re-run with the abort neutralised identically — no check lost.
+
+**Unrelated, still open:** seeding an `f_*` key with a scalar (e.g. `None`) makes `st.slider` raise
+`float() argument must be … not 'NoneType'`. Identical at `0a95c6b`, so pre-existing and not
+introduced here; unreachable via the app, which only ever writes pairs.
 
 ### Loopback 3 — 2026-11-27, user request (UI position only)
 
