@@ -147,11 +147,22 @@ def build_deck(
     tooltip: str,
     features: list[dict[str, Any]],
     district_records: list[dict[str, Any]] | None = None,
+    line_colour: list[int] | None = None,
 ):
     """The Deck: PolygonLayer over a free MapLibre basemap, no key.
 
     `map_provider="maplibre"` with a style *URL string*; a dict style would make
     Streamlit demand mapbox.  The layer id is what the selection state keys on.
+
+    `line_colour` is the "All Precincts" view's edge and nothing else: given, the
+    precinct layer is stroked with that colour as a LAYER-WIDE constant (mirroring
+    how the council overlay ships `COUNCIL_LINE_COLOR`), so a single flat fill is
+    still separable polygon by polygon.  Left as None, the layer ships exactly as
+    it always did -- `stroked=False` and no line props at all, because deck.gl
+    strokes by default and the choropleth's border has to be switched off
+    explicitly.  The colour never rides on the records: a per-record line attribute
+    present in one mode's payload and absent in the other's is how deck.gl's
+    first-record sizing misreads a whole layer.
 
     The tooltip goes on the DECK, never the layer.  st.pydeck_chart takes no
     tooltip argument: it lifts `Deck(tooltip=dict)` into its own protobuf field
@@ -161,6 +172,19 @@ def build_deck(
     tooltip ever appears on hover -- the bug this comment exists to prevent.
     """
     pdk = _pydeck()
+    # Only the uniform view carries line props: deck.gl reads them when `stroked`
+    # is true, and the choropleth's serialised layer must keep holding no border
+    # props at all -- the suite asserts exactly that removal.  Built as a spread so
+    # `line_colour=None` yields the constructor call this function made before the
+    # parameter existed.
+    stroke_props = (
+        {}
+        if line_colour is None
+        else {
+            "get_line_color": list(line_colour),
+            "line_width_min_pixels": settings.ALL_PRECINCTS_LINE_WIDTH_MIN_PIXELS,
+        }
+    )
     layer = pdk.Layer(
         "PolygonLayer",
         data=records,
@@ -172,10 +196,12 @@ def build_deck(
         # explicitly.  Booleans serialise as plain values -- not the `@@=`
         # string trap of fc08df5.  auto_highlight stays on: with no border and
         # no fill, it is the only hover feedback an empty precinct can give.
-        stroked=False,
+        # In the uniform view the border is the point, so `line_colour` flips it on.
+        stroked=line_colour is not None,
         pickable=True,
         auto_highlight=True,
         extruded=False,
+        **stroke_props,
     )
     layers = [layer]
     if district_records:

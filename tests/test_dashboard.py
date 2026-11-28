@@ -1551,6 +1551,480 @@ assert not _at_o.sidebar.slider, len(_at_o.sidebar.slider)
 assert not _at_o.sidebar.expander, [e.label for e in _at_o.sidebar.expander]
 ok("matrix OFFLINE: one st.error, zero filter widgets, unchanged path")
 
+# ===========================================================================
+# "All Precincts": the uniform view, on the RENDERED app
+# ===========================================================================
+# Every check in this block sits ABOVE the tooltip abort on purpose: the region
+# below it never runs, so a rendered-widget assertion written there would enforce
+# nothing while looking like coverage (AGENTS.md's shipped-defect class).  Each
+# check reads the Deck that was handed to st.pydeck_chart -- the payload the
+# browser received -- rather than a Python string built in-process.
+#
+# `render_views` drives the ONE selectbox: no argument is the fresh load, each
+# label is a switch on its own run.  So the sequence ("metric", view label) is
+# exactly the matrix's "switch to a metric" then "switch back" rows, on one
+# session, with the filter state carried across them.
+def render_views(chosen=None, back_to=None, seeded=None):
+    """Load, switch to `chosen`, switch to `back_to`; returns (AppTest, [decks])."""
+    _decks = []
+
+    def _chart(deck, *_a, **_k):
+        _decks.append(deck)
+        return None
+
+    dashboard._cached_features = lambda *_a, **_k: _FILTER_FC
+    dashboard._cached_council_features = lambda *_a, **_k: _FILTER_COUNCIL
+    dashboard._cached_district_options = lambda *_a, **_k: _FILTER_COUNCIL
+    dashboard.st.pydeck_chart = _chart
+    try:
+        _at = AppTest.from_string(_FILTER_SCRIPT)
+        _at.default_timeout = 180
+        for _k, _v in (seeded or {}).items():
+            _at.session_state[_k] = _v
+        _at.run()
+        if chosen is not None:
+            _at.selectbox[0].set_value(chosen)
+            _at.run()
+        if back_to is not None:
+            _at.selectbox[0].set_value(back_to)
+            _at.run()
+    finally:
+        (
+            dashboard._cached_features,
+            dashboard._cached_council_features,
+            dashboard._cached_district_options,
+            dashboard.st.pydeck_chart,
+        ) = _ORIG_FILTER
+    return _at, _decks
+
+
+def _pl(deck):
+    """The precinct layer of a serialised deck, by id -- never by index luck."""
+    return next(l for l in json.loads(deck.to_json())["layers"] if l["id"] == settings.LAYER_ID)
+
+
+# --- the option list: one selectbox, the view at index 0, every metric behind it
+_view_label = settings.ALL_PRECINCTS_VIEW_LABEL
+# Bound here as well as below the abort: this block must not depend on anything the
+# dead region defines (AGENTS.md: a guard below the abort enforces nothing).
+choropleth_labels = [data_layer.label_for(dictionary, f) for f in settings.CHOROPLETH_FIELDS]
+_option_labels = [s.label for s in _at_f.sidebar.selectbox]
+assert _option_labels == ["Colour precincts by"], _option_labels
+assert len(_at_f.sidebar.selectbox) == 1, "a second colour widget appeared"
+_colorbox = _at_f.sidebar.selectbox[0]
+assert list(_colorbox.options) == [_view_label] + choropleth_labels, list(_colorbox.options)
+# The view is what a fresh session opens on, and the metric list keeps its order
+# and its length: "All Precincts" is an ADDED option, so the option count is
+# exactly the field tables' plus one -- no field was displaced by the view.
+assert _colorbox.value == _view_label, _colorbox.value
+assert _colorbox.index == 0, _colorbox.index
+assert len(_colorbox.options) == len(settings.CHOROPLETH_FIELDS) + 1, len(_colorbox.options)
+ok("one selectbox, \"All Precincts\" at index 0 and selected on load, all metrics behind it",
+   f"{len(_colorbox.options)} options, default {_view_label!r}")
+
+# A view is not a column: the label must appear in no field table, no dictionary
+# entry, no CSV header, and therefore not in the derived FILTER_FIELDS either --
+# otherwise the filters, the tooltip, a panel or the data dictionary would start
+# carrying a phantom metric (AGENTS.md's "never add" list, made enforceable).
+assert _view_label not in settings.CHOROPLETH_FIELDS
+assert _view_label not in settings.TOOLTIP_FIELDS
+assert _view_label not in settings.DETAIL_FIELDS
+assert _view_label not in settings.RESULTS_PANEL_FIELDS
+assert _view_label not in data_layer.FILTER_FIELDS
+assert _view_label not in dictionary, "the view was documented as if it were a field"
+assert _view_label not in {k for r in rows for k in r}, "the view leaked into the extract"
+assert data_layer.label_for(dictionary, settings.DEFAULT_CHOROPLETH) != _view_label
+# The sentinel is a LABEL comparison, so a metric whose readable name ever became
+# exactly the view's would be shadowed (choosing it would draw the uniform view).
+# Asserted on the emitted option list, which is what the reader sees, so a rename in
+# the generator is caught here rather than at the map.
+assert len(set(_colorbox.options)) == len(_colorbox.options), (
+    "a metric label collides with the view label, so the selectbox cannot tell them apart")
+# DEFAULT_CHOROPLETH itself is unchanged and still names a real metric: the view
+# replaced the initial SELECTION, not the fallback field.
+assert settings.DEFAULT_CHOROPLETH in settings.CHOROPLETH_FIELDS
+ok("the view label is in no field table, the dictionary, or the extract",
+   f"DEFAULT_CHOROPLETH still {settings.DEFAULT_CHOROPLETH}")
+
+# --- AC1: the fresh load draws every polygon in one fill, edged, legend-free
+_fresh_layers = json.loads(_decks_f[0].to_json())["layers"]
+_fresh_precinct = _pl(_decks_f[0])
+assert len(_fresh_precinct["data"]) == len(_FILTER_FC["features"]), _drawn(_decks_f[0])
+_uniform = [tuple(r["__color"]) for r in _fresh_precinct["data"]]
+assert set(_uniform) == {tuple(settings.ALL_PRECINCTS_COLOR)}, (
+    "the uniform view drew more than one fill colour", sorted(set(_uniform) - {tuple(settings.ALL_PRECINCTS_COLOR)})[:3])
+assert all(len(c) == 4 for c in _uniform), "a fill lost its alpha channel"
+assert settings.ALL_PRECINCTS_COLOR[3] == settings.FILL_ALPHA, (
+    "the view added a second opacity knob instead of sharing FILL_ALPHA")
+assert not any(tuple(r["__color"]) == tuple(settings.NO_DATA_COLOR)
+               for r in _fresh_precinct["data"]), "a polygon stayed invisible in the uniform view"
+# The fill stays a per-record accessor in both modes -- one shared deck path, which
+# is why the fill rides on the record and the edge does not.
+assert _fresh_precinct["getFillColor"] == "@@=__color", _fresh_precinct["getFillColor"]
+assert _fresh_precinct["getPolygon"] == "@@=__rings", _fresh_precinct["getPolygon"]
+assert _fresh_precinct["stroked"] is True, _fresh_precinct.get("stroked")
+# The edge is a LAYER-WIDE constant RGBA, the COUNCIL_LINE_COLOR shape: a plain
+# list, never a string the browser would parse as a record lookup (fc08df5).
+assert _fresh_precinct["getLineColor"] == list(settings.ALL_PRECINCTS_LINE_COLOR), (
+    _fresh_precinct.get("getLineColor"))
+assert not isinstance(_fresh_precinct["getLineColor"], str), "a colour string is a JSON expression"
+assert len(_fresh_precinct["getLineColor"]) == 4, _fresh_precinct["getLineColor"]
+assert _fresh_precinct["getLineColor"][3] == 255, "a faded edge on the only thing separating polygons"
+assert len(set(_fresh_precinct["getLineColor"][:3])) == 1, "the hairline is not neutral"
+assert _fresh_precinct["getLineColor"] != settings.NO_DATA_COLOR
+assert _fresh_precinct["lineWidthMinPixels"] == settings.ALL_PRECINCTS_LINE_WIDTH_MIN_PIXELS, (
+    _fresh_precinct.get("lineWidthMinPixels"))
+# No per-record line attribute anywhere: one mode handing deck.gl a key the other
+# omits is how first-record colour sizing misreads the whole layer.
+_line_keys = sorted({k for r in _fresh_precinct["data"] for k in r if "line" in k.lower()})
+assert not _line_keys, f"a per-record stroke key reached the records: {_line_keys}"
+# Every string prop still has to be legal @deck.gl/json: the browser PARSES these,
+# so a `get_line_color` written as a JS expression would render nothing while the
+# Python side looked flawless.  Swept over both layers, not just the first.
+for _la in _fresh_layers:
+    for _prop, _value in _la.items():
+        if isinstance(_value, str) and _value.startswith("@@="):
+            grammar_ok(_value[3:], f"{_la['id']}.{_prop}")
+        assert not isinstance(_value, str) or "@@=function" not in _value
+# Picking, hover and the overlay are untouched by the view.
+assert _fresh_precinct["pickable"] is True and _fresh_precinct["autoHighlight"] is True
+assert "tooltip" not in _fresh_precinct, "a layer-level tooltip serialises and is never read"
+# The hover card is the SAME channel and the SAME template in both views: the view
+# changes the fill and the stroke, never what a precinct says about itself.  Read off
+# Streamlit's own protobuf field -- the only place st.pydeck_chart looks -- rather
+# than from the spec string, which is what let the tooltip ship unread once already.
+from streamlit.elements.deck_gl_json_chart import _get_pydeck_tooltip as _tip  # noqa: E402
+
+_shipped_tip = _tip(_decks_f[0])
+assert isinstance(_shipped_tip, dict), f"tooltip never reaches Streamlit: {_shipped_tip!r}"
+assert _shipped_tip.get("text") == data_layer.tooltip_template(dictionary), _shipped_tip
+assert "html" not in _shipped_tip, "html is assigned via innerHTML; text is not"
+assert _shipped_tip["text"] == data_layer.tooltip_template(dictionary)
+# And the records the layer is handed still carry every token the template asks for.
+# The unmatched-polygon case is covered by the matrix block below, which decorates
+# "30A4" explicitly -- this sample is drawn from rows, so it holds none.
+_tokens = re.findall(r"\{([^{}]+)\}", _shipped_tip["text"])
+for _tok in _tokens:
+    assert all(_tok in r for r in _fresh_precinct["data"]), f"{_tok} unresolved on some record"
+ok("hover card unchanged by the view: same template on Streamlit's channel, all tokens resolve",
+   f"{len(_tokens)} tokens over {len(_fresh_precinct['data'])} records")
+assert [l["id"] for l in _fresh_layers] == [settings.LAYER_ID, settings.COUNCIL_LAYER_ID], _fresh_layers
+assert len(_pl(_decks_f[0])["data"]) == len(_FILTER_FC["features"])
+ok("AC1: fresh load paints every polygon one RGBA fill with a layer-wide white edge",
+   f"{len(_fresh_precinct['data'])} records at {settings.ALL_PRECINCTS_COLOR}, "
+   f"edge {settings.ALL_PRECINCTS_LINE_COLOR}")
+
+# The same contract, built in-process, so the DEFAULT of the new parameter is proven
+# rather than inferred: `line_colour=None` must hand back the layer this function
+# built before it existed -- stroked False and no line prop at all.  Everything below
+# the tooltip abort that used to assert that (the `stroked serialises as boolean
+# false` check) never runs, so the guarantee is restated here where it does.
+_plain = json.loads(ui.build_deck(
+    data_layer.decorate([_polygon("1046")], rows, settings.DEFAULT_CHOROPLETH),
+    "probe", [_polygon("1046")]).to_json())["layers"][0]
+_stroked = json.loads(ui.build_deck(
+    data_layer.decorate([_polygon("1046")], rows, None),
+    "probe", [_polygon("1046")], None, settings.ALL_PRECINCTS_LINE_COLOR).to_json())["layers"][0]
+assert _plain["stroked"] is False, _plain.get("stroked")
+assert not [k for k in _plain if "line" in k.lower()], sorted(_plain)
+assert _plain["getFillColor"] == "@@=__color" and _plain["getPolygon"] == "@@=__rings"
+assert _stroked["stroked"] is True, _stroked.get("stroked")
+assert _stroked["getLineColor"] == list(settings.ALL_PRECINCTS_LINE_COLOR)
+assert _stroked["lineWidthMinPixels"] == settings.ALL_PRECINCTS_LINE_WIDTH_MIN_PIXELS
+# The two layers differ ONLY in the three stroke props: the accessor contract, the
+# id, the pickability and the highlight are shared, so both modes ride one deck path.
+_delta = sorted(
+    k for k in set(_plain) | set(_stroked)
+    if _plain.get(k) != _stroked.get(k) and k != "data")
+assert _delta == ["getLineColor", "lineWidthMinPixels", "stroked"], _delta
+ok("build_deck(line_colour=None) is the pre-change layer; the stroke is the only delta",
+   f"differing props: {_delta}")
+
+# Matrix rows "Fresh load" / "Switch to a metric", on the render stream: the
+# gradient legend is the thing this view must NOT emit.
+assert len(_at_f.html) == 0, f"a legend was rendered in the uniform view: {len(_at_f.html)}"
+assert [t.value for t in _at_f.title] == [_view_label], [t.value for t in _at_f.title]
+# The emptiness has to mean "the legend was skipped", not "the html channel is
+# broken".  That is proven by the switch block below on the same app: the metric
+# render ships exactly one st.html carrying this field's own range.
+ok("no gradient legend and the view's own title on a fresh load", "zero st.html blocks")
+
+# --- matrix rows "Metric-empty precinct" / "Unattributable polygon" ----------
+# "30A4" has no CSV row at all (asserted at :524) and 2607/3111/4116 carry no value
+# for any colourable field, so under the default metric every one of them is
+# NO_DATA_COLOR -- invisible.  In this view they are painted and edged like
+# everything else.  Driven on `decorate` directly so the two states are pinned to
+# named precincts rather than to whatever a stub layer happens to sample.
+_metric_empty = sorted(
+    r[settings.JOIN_CSV_KEY].strip() for r in rows
+    if (r.get(settings.JOIN_CSV_KEY) or "").strip()
+    and all(data_layer.to_float(r.get(f)) is None for f in settings.CHOROPLETH_FIELDS)
+)
+assert _metric_empty, "every precinct carries a value for some metric; this matrix row moved"
+assert "30A4" not in EXTRACT_CODES, "30A4 gained a CSV row; the matrix row moved"
+_valued_code = next(
+    r[settings.JOIN_CSV_KEY].strip() for r in rows
+    if (r.get(settings.JOIN_CSV_KEY) or "").strip()
+    and data_layer.to_float(r.get(settings.DEFAULT_CHOROPLETH)) is not None
+)
+_probe_codes = _metric_empty[:3] + ["30A4", _valued_code]
+_probe_features = [_polygon(c) for c in _probe_codes]
+_uniform_recs = data_layer.decorate(_probe_features, rows, None)
+assert len(_uniform_recs) == len(_probe_codes), len(_uniform_recs)
+for rec in _uniform_recs:
+    assert rec["__color"] == list(settings.ALL_PRECINCTS_COLOR), rec[settings.JOIN_LAYER_KEY]
+    assert len(rec["__color"]) == 4 and rec["__color"][3] > 0, rec
+# The join is still reported, so a click on an unattributable polygon still says
+# "no data in this research extract" rather than inventing a row.
+_matched = {str(r[settings.JOIN_LAYER_KEY]).strip(): r["__matched"] for r in _uniform_recs}
+assert _matched[_valued_code] is True and _matched["30A4"] is False, _matched
+assert all(_matched[c] is True for c in _metric_empty[:3]), "a metric-empty precinct lost its row"
+# Everything the choropleth needs from a record is still there: rings, tooltip
+# slots, the join key.  Only `__color` branches.
+for rec in _uniform_recs:
+    assert rec["__rings"], "the view dropped the geometry accessor"
+    assert {k for k in rec if k.startswith("v_")} == {
+        "v_" + f for f in settings.TOOLTIP_FIELDS}, sorted(rec)
+    # the fill list is per record, not one shared object a later mutation could
+    # spread across the layer (or back into the constant)
+    assert rec["__color"] is not settings.ALL_PRECINCTS_COLOR
+assert len({id(r["__color"]) for r in _uniform_recs}) == len(_uniform_recs), (
+    "two records share one mutable fill list")
+_ramp_recs = data_layer.decorate(_probe_features, rows, settings.DEFAULT_CHOROPLETH)
+_by_code = {str(r[settings.JOIN_LAYER_KEY]).strip(): r for r in _ramp_recs}
+for code in _metric_empty[:3] + ["30A4"]:
+    assert _by_code[code]["__color"] == list(settings.NO_DATA_COLOR), (
+        f"{code} is not transparent on the default metric; the contrast this view "
+        "exists for is gone")
+assert _by_code[_valued_code]["__color"] != list(settings.NO_DATA_COLOR), (
+    "a valued precinct is not painted under the ramp; the two modes are indistinguishable")
+ok("matrix: metric-empty and unattributable precincts are painted and edged here, "
+   "transparent under the ramp", f"{len(_metric_empty)} fully-blank precincts probed")
+
+# --- matrix rows "Switch to a metric" / "Switch back" -----------------------
+# Two sessions, because AppTest's element tree describes only the LAST run: the
+# metric's legend has to be read from a render that STOPS on the metric, and the
+# switch-back from one that returns to the view.  Both share the same sequence up to
+# that point, so together they are the matrix's two rows.
+_metric_label = data_layer.label_for(dictionary, settings.DEFAULT_CHOROPLETH)
+_at_m, _decks_m = render_views(chosen=_metric_label)
+assert not _at_m.exception, [str(e.value) for e in _at_m.exception]
+assert len(_decks_m) == 2, len(_decks_m)
+assert _at_m.selectbox[0].value == _metric_label, _at_m.selectbox[0].value
+_metric_layer = _pl(_decks_m[-1])
+# Ramp colours are back, the stroke is gone, and the blanks go transparent again.
+assert _metric_layer["stroked"] is False, _metric_layer.get("stroked")
+assert not [k for k in _metric_layer if "line" in k.lower()], (
+    [k for k in _metric_layer if "line" in k.lower()], "a border prop followed the metric view")
+assert _metric_layer["getFillColor"] == "@@=__color"
+assert {len(r["__color"]) for r in _metric_layer["data"]} == {4}, "a ramp fill lost its alpha"
+assert any(tuple(r["__color"]) == tuple(settings.NO_DATA_COLOR) for r in _metric_layer["data"]), (
+    "nothing is transparent under the metric; this render proves nothing about the ramp")
+assert any(is_painted(r["__color"]) for r in _metric_layer["data"]), "no precinct is painted at all"
+assert all(not is_painted(r["__color"]) or r["__color"][3] == settings.FILL_ALPHA
+           for r in _metric_layer["data"]), "a painted fill is not at FILL_ALPHA"
+assert len({tuple(r["__color"]) for r in _metric_layer["data"]}) > 1, (
+    "the ramp painted one colour for every precinct")
+# The gradient legend comes back, holding this metric's own range -- the same bytes
+# `legend_html` builds for it, so the legend followed the selection rather than
+# being re-rendered from a remembered default.
+assert len(_at_m.html) == 1, f"the legend did not come back with the metric: {len(_at_m.html)}"
+assert _at_m.html[0].value == ui.legend_html(
+    data_layer.field_domain(rows, settings.DEFAULT_CHOROPLETH)), "legend did not follow the field"
+assert [t.value for t in _at_m.title] == [_metric_label], [t.value for t in _at_m.title]
+ok("matrix: a metric restores the ramp, stroked=False, no per-record stroke key, "
+   "and the gradient legend", f"{_metric_label!r}: 1 legend, transparent blanks back")
+
+# Switched BACK: uniform fill, edge, no legend -- and the selectbox really moved, so
+# this is not the fresh load re-asserted.
+_at_sw, _decks_sw = render_views(chosen=_metric_label, back_to=_view_label)
+assert not _at_sw.exception, [str(e.value) for e in _at_sw.exception]
+assert len(_decks_sw) == 3, len(_decks_sw)
+_back_layer = _pl(_decks_sw[2])
+assert _at_sw.selectbox[0].value == _view_label, _at_sw.selectbox[0].value
+assert {tuple(r["__color"]) for r in _back_layer["data"]} == {tuple(settings.ALL_PRECINCTS_COLOR)}
+assert _back_layer["stroked"] is True, _back_layer.get("stroked")
+assert _back_layer["getLineColor"] == list(settings.ALL_PRECINCTS_LINE_COLOR)
+assert not [k for k in _back_layer["data"][0] if "line" in k.lower()], sorted(_back_layer["data"][0])
+assert len(_at_sw.html) == 0, f"a legend survived the switch back: {len(_at_sw.html)}"
+assert [t.value for t in _at_sw.title] == [_view_label], [t.value for t in _at_sw.title]
+# Filter state is kept across both switches: no slider was touched here, so every
+# slider still sits on its own full axis range and the whole sample is drawn.
+assert _drawn(_decks_sw[2]) == len(_FILTER_FC["features"]), _drawn(_decks_sw[2])
+assert all(_close(_slider_for(_at_sw, _f).value[0], _AXIS[_f][0])
+           and _close(_slider_for(_at_sw, _f).value[1], _AXIS[_f][1])
+           for _f in filter_bounds), "switching the view moved a filter"
+ok("matrix: a metric restores the ramp, stroked=False and the legend; switching back "
+   "restores uniform + edge with no legend and the filters intact",
+   f"{len(_at_sw.html)} legend on the view, 1 on the metric")
+
+# --- matrix row "Narrowed filter": the mask keeps shrinking the map here ------
+_nv_axis = _AXIS[_NARROW]
+_narrow_view = ((_nv_axis[0] + _nv_axis[1]) / 2.0, _nv_axis[1])
+_native_hi = filter_bounds[_NARROW][1]
+_at_nv, _decks_nv = render_views(seeded={settings.FILTER_SESSION_PREFIX + _NARROW: _narrow_view})
+assert not _at_nv.exception, [str(e.value) for e in _at_nv.exception]
+_nv_mask = data_layer.visible_precincts(rows, filter_bounds,
+                                        {_NARROW: (_native_hi / 2.0, _native_hi)})
+assert _nv_mask is not None and _nv_mask, _NARROW
+_nv_layer = _pl(_decks_nv[0])
+_nv_kept = {str(r[settings.JOIN_LAYER_KEY]).strip() for r in _nv_layer["data"]}
+assert _nv_kept == _nv_mask & {str(k).strip() for k in _FILTER_CODES}, (
+    len(_nv_kept), len(_nv_mask), sorted(_nv_kept ^ _nv_mask)[:5])
+assert 0 < len(_nv_kept) < len(_FILTER_CODES), (len(_nv_kept), len(_FILTER_CODES))
+assert {tuple(r["__color"]) for r in _nv_layer["data"]} == {tuple(settings.ALL_PRECINCTS_COLOR)}, (
+    "a survivor of the filter lost the uniform fill")
+assert _nv_layer["stroked"] is True and _nv_layer["getLineColor"] == list(settings.ALL_PRECINCTS_LINE_COLOR)
+assert len(_at_nv.html) == 0, "narrowing a filter rendered a legend in the uniform view"
+ok("matrix: a narrowed slider still shrinks the map here, every survivor uniform and edged",
+   f"{len(_nv_kept)} of {len(_FILTER_CODES)} polygons at axis {_narrow_view}")
+# A blank on the narrowed field is hidden here too: the mask runs the same way it
+# does under the ramp, and "painted" is not the same claim as "kept".
+assert not [k for k in _FILTER_CODES if k not in _nv_kept
+            and data_layer.to_float(index[k].get(_NARROW)) is None and k in _nv_mask], (
+    "a blank on the narrowed field survived the mask in the uniform view")
+ok("the mask is unchanged by the view: blanks on the narrowed field stay hidden")
+
+# --- matrix row "Clicking still fills both panels" --------------------------
+# The click is driven through Streamlit's own PydeckState (the object main() reads),
+# and the SAME precinct is clicked in both views: the panels must come out identical,
+# because the view changes the fill, not the join.
+from streamlit.elements.deck_gl_json_chart import PydeckSelectionState as _SelState  # noqa: E402
+from streamlit.elements.deck_gl_json_chart import PydeckState as _PState  # noqa: E402
+
+
+def render_click(chosen=None):
+    """One load, deck captured, with a precinct clicked; returns (AppTest, [decks])."""
+    _decks = []
+    _state = _PState({"selection": _SelState(
+        {"objects": {settings.LAYER_ID: [{settings.JOIN_LAYER_KEY: "1045"}]}, "indices": {}})})
+
+    def _chart(deck, *_a, **_k):
+        _decks.append(deck)
+        return _state
+
+    dashboard._cached_features = lambda *_a, **_k: _FILTER_FC
+    dashboard._cached_council_features = lambda *_a, **_k: _FILTER_COUNCIL
+    dashboard._cached_district_options = lambda *_a, **_k: _FILTER_COUNCIL
+    dashboard.st.pydeck_chart = _chart
+    try:
+        _at = AppTest.from_string(_FILTER_SCRIPT)
+        _at.default_timeout = 180
+        _at.run()
+        if chosen is not None:
+            _at.selectbox[0].set_value(chosen)
+            _at.run()
+    finally:
+        (
+            dashboard._cached_features,
+            dashboard._cached_council_features,
+            dashboard._cached_district_options,
+            dashboard.st.pydeck_chart,
+        ) = _ORIG_FILTER
+    return _at, _decks
+
+
+def _panel_texts(at):
+    """[(heading, metric/value pairs)] for the panels, as emitted, in order."""
+    headings = [s.value for s in at.subheader]
+    frames = [d.value for d in at.dataframe]
+    assert len(headings) == len(frames) == 2, (headings, len(frames))
+    return [(h, list(zip(f["Metric"], f["Value"]))) for h, f in zip(headings, frames)]
+
+
+_at_click, _decks_click = render_click()
+assert not _at_click.exception, [str(e.value) for e in _at_click.exception]
+assert _at_click.selectbox[0].value == _view_label, _at_click.selectbox[0].value
+assert {tuple(r["__color"]) for r in _pl(_decks_click[-1])["data"]} == {
+    tuple(settings.ALL_PRECINCTS_COLOR)}
+_uniform_panels = _panel_texts(_at_click)
+assert [h for h, _ in _uniform_panels] == [
+    settings.RESULTS_PANEL_HEADING, settings.DEMOGRAPHICS_PANEL_HEADING], _uniform_panels
+assert len(_uniform_panels[0][1]) == len(settings.RESULTS_PANEL_FIELDS), _uniform_panels[0][1]
+assert len(_uniform_panels[1][1]) == len(panel), _uniform_panels[1][1]
+# The clicked precinct's own values are the CSV's, not a placeholder: precinct 1045
+# carries a canvass row, so the results panel must show figures, not em-dashes only.
+assert any(v != settings.NO_DATA_TEXT for _, v in _uniform_panels[0][1]), _uniform_panels[0][1]
+_at_rclick, _decks_rclick = render_click(chosen=_metric_label)
+assert _at_rclick.selectbox[0].value == _metric_label, _at_rclick.selectbox[0].value
+assert not _at_rclick.exception, [str(e.value) for e in _at_rclick.exception]
+assert _panel_texts(_at_rclick) == _uniform_panels, (
+    "the detail panels differ between the uniform view and a metric -- the view was "
+    "allowed to reach the join")
+ok("a click in \"All Precincts\" fills both panels exactly as a metric does",
+   f"{len(_uniform_panels[0][1])} + {len(_uniform_panels[1][1])} metrics")
+
+# An unattributable polygon clicked HERE: still the "no data" statement, no table,
+# no traceback -- the matrix's third row is about the same path, and the view must
+# not have quietly invented a row for a polygon the crosswalk cannot attribute.
+def _render_orphan_click():
+    _decks = []
+    _state = _PState({"selection": _SelState(
+        {"objects": {settings.LAYER_ID: [{settings.JOIN_LAYER_KEY: "30A4"}]}, "indices": {}})})
+    dashboard._cached_features = lambda *_a, **_k: _FILTER_FC
+    dashboard._cached_council_features = lambda *_a, **_k: _FILTER_COUNCIL
+    dashboard._cached_district_options = lambda *_a, **_k: _FILTER_COUNCIL
+    dashboard.st.pydeck_chart = lambda deck, *_a, **_k: _decks.append(deck) or _state
+    try:
+        _at = AppTest.from_string(_FILTER_SCRIPT)
+        _at.default_timeout = 180
+        _at.run()
+    finally:
+        (
+            dashboard._cached_features,
+            dashboard._cached_council_features,
+            dashboard._cached_district_options,
+            dashboard.st.pydeck_chart,
+        ) = _ORIG_FILTER
+    return _at, _decks
+
+
+_at_orphan, _decks_orphan = _render_orphan_click()
+assert not _at_orphan.exception, [str(e.value) for e in _at_orphan.exception]
+assert _at_orphan.dataframe == [], "an unattributable polygon rendered a detail table"
+assert any("no data" in i.value for i in _at_orphan.info), [i.value for i in _at_orphan.info]
+assert {tuple(r["__color"]) for r in _pl(_decks_orphan[-1])["data"]} == {
+    tuple(settings.ALL_PRECINCTS_COLOR)}, "the clicked orphan was not drawn uniformly"
+ok("matrix: clicking an unattributable polygon here says \"no data\", no table, no traceback")
+
+# The offline path keeps its shape in the new default view: one st.error, the
+# fallback picker, no map and no legend.  Nothing about the view is reachable
+# before the layer guard, so this is the existing row re-asserted on the new load.
+def _offline_view():
+    def _boom(*_a, **_k):
+        raise RuntimeError("offline probe")
+
+    dashboard._cached_features = _boom
+    dashboard._cached_council_features = lambda *_a, **_k: _FILTER_COUNCIL
+    dashboard._cached_district_options = lambda *_a, **_k: _FILTER_COUNCIL
+    try:
+        _at = AppTest.from_string(_FILTER_SCRIPT)
+        _at.default_timeout = 180
+        _at.run()
+    finally:
+        (
+            dashboard._cached_features,
+            dashboard._cached_council_features,
+            dashboard._cached_district_options,
+        ) = _ORIG_FILTER[:3]
+    return _at
+
+
+_at_ov = _offline_view()
+assert not _at_ov.exception, [str(e.value) for e in _at_ov.exception]
+assert len(_at_ov.error) == 1, [e.value for e in _at_ov.error]
+assert len(_at_ov.html) == 0, "a legend was rendered with no map to key"
+assert [t.value for t in _at_ov.title] == [_view_label], [t.value for t in _at_ov.title]
+assert len(_at_ov.selectbox) == 2, [_s.label for _s in _at_ov.selectbox]
+# The fallback picker is emitted in the main body before the sidebar block is
+# reopened, so AppTest lists it first: asserted by label, never by index.
+assert "Precinct (research extract only)" in [s.label for s in _at_ov.selectbox], [
+    s.label for s in _at_ov.selectbox]
+assert "Colour precincts by" in [s.label for s in _at_ov.selectbox], [
+    s.label for s in _at_ov.selectbox]
+assert len(_at_ov.dataframe) == 2, "the joined panels stopped rendering offline"
+ok("matrix: layer unreachable in the new default view -> one st.error, picker, no map, no legend")
+
 record = next(
     (r for r in rows if r["dallas_county_precinct_number"] == "1046"), rows[0]
 )
@@ -3044,8 +3518,11 @@ at = run_app()
 choropleth_labels = [data_layer.label_for(dictionary, f) for f in settings.CHOROPLETH_FIELDS]
 side = at.selectbox[0]
 assert side.label == "Colour precincts by", side.label
-assert side.value == data_layer.label_for(dictionary, settings.DEFAULT_CHOROPLETH), side.value
-assert [o for o in side.options] == choropleth_labels, side.options
+# Amended by the "All Precincts" plan: the view is option 0 and the selection on
+# load, with every metric behind it in table order.  DEFAULT_CHOROPLETH is unchanged
+# as the fallback metric -- it is option 1 here, not option 0.
+assert side.value == settings.ALL_PRECINCTS_VIEW_LABEL, side.value
+assert [o for o in side.options] == [settings.ALL_PRECINCTS_VIEW_LABEL] + choropleth_labels, side.options
 # Colouring and tooltiping are separate concerns now, so the sets differ:
 # everything colourable is also shown on hover, but not vice versa.
 assert set(settings.CHOROPLETH_FIELDS) < set(settings.TOOLTIP_FIELDS), (
@@ -3147,6 +3624,15 @@ ok("AC4: detail_panel_fields is still 17 over 820 rows, NO_DATA_FIELDS still 9",
 assert [b.label for b in at.selectbox] == ["Colour precincts by"], [
     b.label for b in at.selectbox
 ]
+# Amended by the "All Precincts" plan: the same single widget now offers the view as
+# its first option.  Restated here rather than left to the live block above so this
+# region keeps describing the widget it is sitting next to -- one selectbox, labelled
+# as before, with the view prepended to the metric labels.
+assert list(at.selectbox[0].options) == [
+    settings.ALL_PRECINCTS_VIEW_LABEL
+] + [data_layer.label_for(dictionary, f) for f in settings.CHOROPLETH_FIELDS], (
+    at.selectbox[0].options)
+assert at.selectbox[0].value == settings.ALL_PRECINCTS_VIEW_LABEL, at.selectbox[0].value
 menu = at.multiselect[0]
 assert menu.label == settings.DISTRICT_SELECTOR_LABEL, menu.label
 # The option list is read off the layer (`council`, fetched at :722), not typed
@@ -3365,6 +3851,16 @@ try:
     at_bad.multiselect[0].set_value(["1"])
     at_bad.run()
     assert len(seen) == before_bad + 1, f"the map stopped rendering: {seen}"
+    # Amended by the "All Precincts" plan: the app opens on the uniform view, which
+    # renders NO legend, so `len(html) == 1` stopped being a description of this
+    # render.  The row is about the overlay degrading and nothing else going with it,
+    # so it is restated on what the view does owe: the map, both panel headings, and a
+    # single warning.  The legend contract for a metric is asserted live above the
+    # tooltip abort and on `at_leg` below.
+    assert len(at_bad.html) == 0, "a legend reached the uniform view"
+    assert {s.value for s in at_bad.subheader} == {
+        settings.RESULTS_PANEL_HEADING, settings.DEMOGRAPHICS_PANEL_HEADING}, (
+        "a failed boundary fetch took the panel headings with it")
     assert len(at_bad.warning) == 1, [w.value for w in at_bad.warning]
     assert settings.COUNCIL_LAYER_URL in at_bad.warning[0].value, at_bad.warning[0].value
     assert "CouncilBoundaries" in at_bad.warning[0].value, at_bad.warning[0].value
@@ -3372,7 +3868,6 @@ try:
     assert not at_bad.exception
     bad_layers = json.loads(seen[-1].to_json())["layers"]
     assert [la["id"] for la in bad_layers] == [settings.LAYER_ID], bad_layers
-    assert len(at_bad.html) == 1, "the legend vanished with the overlay"
     ok("matrix: boundary fetch raises -> one warning naming its URL, map still renders")
 
     # (b) Matrix row this change introduces: the menu LISTING fails, so there is
@@ -3398,7 +3893,13 @@ try:
     )
     nolist_layers = json.loads(seen[-1].to_json())["layers"]
     assert [la["id"] for la in nolist_layers] == [settings.LAYER_ID], nolist_layers
-    assert len(at_nolist.html) == 1, "the legend vanished with the menu"
+    # Same amendment as (a): this render is the uniform view, which owes no legend.
+    # The row is about the empty menu costing the listing and nothing else, so the
+    # legend claim becomes the map's own contract plus the two panel headings.
+    assert len(at_nolist.html) == 0, "a legend reached the uniform view"
+    assert {s.value for s in at_nolist.subheader} == {
+        settings.RESULTS_PANEL_HEADING, settings.DEMOGRAPHICS_PANEL_HEADING}, (
+        "a failed menu listing took the panel headings with it")
     ok("matrix: menu listing raises -> one warning naming its URL, no boundary request",
        f"{len(council_calls) - before_nolist} new boundary calls")
 finally:
@@ -3725,9 +4226,20 @@ ok("title is the selected choropleth field's readable label")
 # Asserting a legend string can be *built* is what let the tooltip ship unread.
 # This asserts one html block arrives, holding this field's real range and the
 # same colours the map paints with.
-assert len(at.html) == 1, f"expected exactly one legend block, got {len(at.html)}"
+#
+# Amended by the "All Precincts" plan: `at` is now the UNIFORM view, which ships
+# no legend by design.  So the legend contract is asserted on a render switched to
+# DEFAULT_CHOROPLETH -- the metric this block was written against -- and the view's
+# own zero-legend state is asserted on `at`.  Corrected, not deleted: the channel
+# proof below is the guard against a legend that is built but never rendered.
+assert len(at.html) == 0, f"the uniform view rendered a legend: {len(at.html)}"
+at_leg = run_app()
+at_leg.selectbox[0].set_value(data_layer.label_for(dictionary, settings.DEFAULT_CHOROPLETH))
+at_leg.run()
+assert not at_leg.exception, at_leg.exception
+assert len(at_leg.html) == 1, f"expected exactly one legend block, got {len(at_leg.html)}"
 default_domain = data_layer.field_domain(rows, settings.DEFAULT_CHOROPLETH)
-legend = at.html[0].value
+legend = at_leg.html[0].value
 assert isinstance(legend, str) and legend == ui.legend_html(default_domain)
 lo, hi = default_domain
 for endpoint in (data_layer.format_value(lo), data_layer.format_value(hi)):
@@ -3753,7 +4265,8 @@ assert "dashed" in legend and "No value for this metric" in legend
 ok("legend keys the empty style with a dashed outline")
 
 # Order is part of "underneath the map": heading, map, legend, then captions.
-stream = [getattr(e, "type", "") or type(e).__name__ for e in at.main]
+# Read on `at_leg` because the uniform view has no legend to place.
+stream = [getattr(e, "type", "") or type(e).__name__ for e in at_leg.main]
 for probe in ("title", "deck_gl_json_chart", "html", "caption"):
     assert probe in stream, (probe, stream)
 order = [stream.index(p) for p in ("title", "deck_gl_json_chart", "html", "caption")]
@@ -3872,14 +4385,14 @@ assert set(s.value for s in at5.subheader) == {
 }, [s.value for s in at5.subheader]
 ok("layer unreachable -> one st.error naming the URL, both panels still render")
 
-# The title is chosen before the layer is fetched, so it still names the metric
-# offline.  The legend keys the MAP's ramp and there is no map, so none renders:
-# a legend over an absent map would describe colours nobody can see.
-assert [t.value for t in at5.title] == [
-    data_layer.label_for(dictionary, settings.DEFAULT_CHOROPLETH)
-], at5.title
+# The title is chosen before the layer is fetched, so it still names the view
+# offline.  Amended by the "All Precincts" plan: the view is what a session opens
+# on, so the offline title is the view label rather than the default metric's.
+# The legend keys the MAP's ramp and there is no map, so none renders: a legend
+# over an absent map would describe colours nobody can see.
+assert [t.value for t in at5.title] == [settings.ALL_PRECINCTS_VIEW_LABEL], at5.title
 assert len(at5.html) == 0, f"a legend appeared with no map to key: {at5.html}"
-ok("offline -> title still names the field, no legend without the map")
+ok("offline -> title still names the selection, no legend without the map")
 
 # A field the dictionary cannot name fails fast rather than rendering blank.
 sabotaged = {k: v for k, v in dictionary.items() if k != "pct_nh_white"}

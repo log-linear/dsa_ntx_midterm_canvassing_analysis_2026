@@ -3,13 +3,13 @@ title: 'All Precincts default map view'
 type: feature
 ticket: ''
 created: '2026-11-27'
-status: in-progress
+status: in-review
 baseline_revision: '388dc3b75902fe5952433100b7ed4f76e21c1f5b'
 route: full
 route_source: auto
 risk: medium
-review: ''
-review_source: ''
+review: quick
+review_source: pinned
 lenses_ran: []
 review_loop_iteration: 0
 context:

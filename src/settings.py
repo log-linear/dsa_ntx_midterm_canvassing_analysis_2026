@@ -85,6 +85,14 @@ TOOLTIP_FIELDS = [
 ]
 DEFAULT_CHOROPLETH = "prop_a_city_no_canvassing_pct"
 
+# The colour selectbox offers one option that is NOT in this list: the "All
+# Precincts" view.  Its label and colours are defined below, beside the other
+# sidebar strings and after FILL_ALPHA respectively -- a `[.., FILL_ALPHA]` colour
+# cannot be spelled here at import time.  It is deliberately absent from every
+# field table here and from the data dictionary: a view is not a column.
+# `DEFAULT_CHOROPLETH` is unchanged and still names the fallback metric, even
+# though the app now opens on the view at option 0.
+
 # The two clicked-precinct panels, side by side, results first.  The headings are
 # view titles, not metric labels -- metric names all come out of the data
 # dictionary, but no field owns a panel's title, so these are the only user-visible
@@ -201,6 +209,35 @@ NO_DATA_COLOR = [0, 0, 0, 0]
 # data; the checks that protect them belong to the suite, not to import time.
 # ---------------------------------------------------------------------------
 FILL_ALPHA = 150
+
+# ---------------------------------------------------------------------------
+# The "All Precincts" view: one uniform fill, one layer-wide edge.
+#
+# Both are RGBA and both are DEFINED BELOW FILL_ALPHA, which is what makes the
+# view reuse the choropleth's single opacity knob instead of adding a second one.
+#
+# ALL_PRECINCTS_COLOR: neutral gray (R == G == B, so no hue reads as data) at
+# FILL_ALPHA, so the MapLibre basemap's street names still show through.  This is
+# the fill NO_DATA_COLOR cannot give: a precinct with no value for any metric is
+# invisible under the ramp and simply another gray polygon here.
+#
+# ALL_PRECINCTS_LINE_COLOR: a white hairline at full alpha, so every polygon is
+# separated from its neighbours by edge rather than by colour.  Alpha stays 255 --
+# the edge is the only thing distinguishing adjacent precincts in this view, and
+# it rides above the semi-transparent fill, so fading it would blur the map back
+# into one shape.  Both lists stay length 4: deck.gl sizes a colour attribute from
+# the first record it sees, the ragged-alpha class of bug recorded above.
+#
+# The stroke goes on the LAYER, never on the record.  A per-record line-colour key
+# would exist in this view's payload and not the choropleth's, which is exactly the
+# asymmetry that bug class needs; `COUNCIL_LINE_COLOR` is the shipped precedent for
+# a layer-wide constant RGBA reaching `get_line_color` as a plain list.
+# ---------------------------------------------------------------------------
+ALL_PRECINCTS_COLOR = [128, 128, 128, FILL_ALPHA]  # neutral gray, basemap reads through
+ALL_PRECINCTS_LINE_COLOR = [255, 255, 255, 255]  # white hairline, full alpha
+# Device pixels, mirroring COUNCIL_LINE_WIDTH_MIN_PIXELS: a hairline in metres
+# disappears when the whole county is on screen, which is this view's default zoom.
+ALL_PRECINCTS_LINE_WIDTH_MIN_PIXELS = 1
 
 # ---------------------------------------------------------------------------
 # The ramp: viridis, matplotlib's default perceptually-uniform sequential
@@ -320,6 +357,12 @@ COUNCIL_LAYER_ID = "council_districts"
 COUNCIL_LINE_COLOR = [75, 75, 75, 200]  # neutral ink border, no blue cast
 COUNCIL_FILL_COLOR = [200, 200, 200, 75]  # transparent light gray district wash
 COUNCIL_LINE_WIDTH_MIN_PIXELS = 2  # device px, so a boundary survives zoom-out
+
+# The colour selectbox's non-metric option, and the only user-visible string this
+# view contributes: "All Precincts" draws every polygon in one flat fill with a
+# white edge instead of a ramp.  Sidebar chrome, so it sits with the other widget
+# captions; its two colours are defined up at FILL_ALPHA, which they need.
+ALL_PRECINCTS_VIEW_LABEL = "All Precincts"
 
 # The district menu's caption.  The menu's values are the district numbers the
 # service reports, so nothing else needs a name of its own.  (It superseded the

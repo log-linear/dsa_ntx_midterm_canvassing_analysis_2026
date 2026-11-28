@@ -378,7 +378,7 @@ def visible_precincts(
 
 
 def decorate(
-    features: list[dict[str, Any]], rows: list[dict[str, str]], field: str
+    features: list[dict[str, Any]], rows: list[dict[str, str]], field: str | None
 ) -> list[dict[str, Any]]:
     """One pydeck record per polygon: layer attributes plus display values.
 
@@ -386,9 +386,21 @@ def decorate(
     bridge iterates `data` directly.  A polygon's rings ride along as
     `__rings`; colour, match state and the pre-formatted tooltip metrics are plain
     keys on the record, which is what the accessors below name.
+
+    `field=None` is the "All Precincts" view, and the ONLY non-metric case.  It
+    skips `field_domain`/`color_scale` entirely and paints every record with the
+    uniform `ALL_PRECINCTS_COLOR`, which is what makes a precinct that carries no
+    value for any metric visible at all.  The alternative -- passing a field whose
+    domain comes back None -- does not raise, it answers `NO_DATA_COLOR` for every
+    record, and the map silently draws nothing: an invisible failure, not a loud
+    one.  Nothing else about the record changes between the two modes; the stroke
+    is a LAYER prop (`build_deck`'s `line_colour`) and never a per-record key, so
+    one view cannot hand deck.gl an attribute the other omits.
     """
     index = join_index(rows)
-    domain = field_domain(rows, field)
+    # Only read for a metric: with field None there is no ramp to scale onto, and
+    # `domain` staying None keeps the colour branch below the sole path available.
+    domain = None if field is None else field_domain(rows, field)
     # Whether each tooltip field holds a share (0-1) or a count, decided once per
     # field from the whole extract -- never per value.  Outside the feature loop so
     # 791 polygons do not each re-scan all 820 rows.  Scoped to TOOLTIP_FIELDS: the
@@ -401,9 +413,15 @@ def decorate(
         record = dict(feature.get("properties") or {})
         row = index.get(str(record.get(settings.JOIN_LAYER_KEY, "")).strip())
         record["__rings"] = coordinates if geometry.get("type") == "Polygon" else []
-        record["__color"] = color_scale(
-            None if row is None else to_float(row.get(field)), domain
-        )
+        if field is None:
+            # Every polygon, matched or not: the whole point of the view is that
+            # nothing is transparent.  A fresh list per record, as `color_scale`
+            # returns, so no two records share one mutable list.
+            record["__color"] = list(settings.ALL_PRECINCTS_COLOR)
+        else:
+            record["__color"] = color_scale(
+                None if row is None else to_float(row.get(field)), domain
+            )
         record["__matched"] = row is not None
         # The `v_` keys are the tooltip's data, so they follow TOOLTIP_FIELDS --
         # NOT CHOROPLETH_FIELDS, which only decides what you can colour by.  The

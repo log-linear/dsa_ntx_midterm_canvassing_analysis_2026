@@ -1,13 +1,22 @@
 """Streamlit precinct choropleth dashboard.
 
-Draws the county's 2026 election precincts as a pydeck choropleth, joins
-data/precinct_data.csv onto each polygon on `NewPrcnt` <->
+Draws the county's 2026 election precincts as a pydeck PolygonLayer over a MapLibre
+basemap, joins data/precinct_data.csv onto each polygon on `NewPrcnt` <->
 `dallas_county_precinct_number`, and turns a clicked precinct into two
 side-by-side detail panels: `Precinct results` (RESULTS_PANEL_FIELDS) and
 `Precinct Demographics (estimated)` (DETAIL_FIELDS, narrowed to the populated
 ones).  Hovering shows TOOLTIP_FIELDS, which is its own list: the panel and the
 tooltip are adjusted independently.  Every metric is labelled with its
 `readable_name` from data/data_dictionary.csv -- never the raw field name.
+
+The colour selectbox opens on "All Precincts" (`ALL_PRECINCTS_VIEW_LABEL`), which
+paints every displayed polygon one flat grey at FILL_ALPHA with a layer-wide white
+hairline: a precinct with no value for any metric is visible there, which is the
+one thing the choropleth cannot do because NO_DATA_COLOR is fully transparent.
+Choosing a metric restores the viridis ramp, drops the stroke and brings back the
+gradient legend.  Filtering, the council overlay, hover and both detail panels
+behave identically in the two views -- the view changes the fill and the stroke,
+never the join.
 
 The extract carries a row for every precinct the VTD crosswalk can attribute,
 not only the precincts a canvass workbook named, so the detail panel resolves a
@@ -64,12 +73,26 @@ def main() -> None:
 
     with st.sidebar:
         st.header("Map")
+        # One selectbox, same label, same position: "All Precincts" is an added
+        # option at index 0, not a second widget, because the selected option IS
+        # the view -- a separate toggle would be a second source of truth that can
+        # desynchronise from the colours on the map.  The view label is not in
+        # CHOROPLETH_FIELDS (it is a view, not a column), so it cannot be looked up
+        # in `labels` and must not be added to any field table or the dictionary.
         chosen = st.selectbox(
             "Colour precincts by",
-            [labels[f] for f in settings.CHOROPLETH_FIELDS],
-            index=settings.CHOROPLETH_FIELDS.index(settings.DEFAULT_CHOROPLETH),
+            [settings.ALL_PRECINCTS_VIEW_LABEL]
+            + [labels[f] for f in settings.CHOROPLETH_FIELDS],
+            index=0,
         )
-        field = next(f for f in settings.CHOROPLETH_FIELDS if labels[f] == chosen)
+        # None is the sentinel for the uniform view.  Without the guard the lookup
+        # below raises StopIteration on an option that names no field; with it
+        # `color_scale`/`field_domain` are never reached in that mode either.
+        field = (
+            None
+            if chosen == settings.ALL_PRECINCTS_VIEW_LABEL
+            else next(f for f in settings.CHOROPLETH_FIELDS if labels[f] == chosen)
+        )
         # The district menu is NOT created here.  st.sidebar elements are laid out
         # in call order, so it is added below -- after the precinct layer is known
         # good -- and still lands directly beneath this selectbox.  It has to be
@@ -83,9 +106,10 @@ def main() -> None:
         #     "nothing, but stay hoverable and clickable."
         # )
 
-    # The title names the metric actually on the map, so a screenshot or a
-    # printed page carries it without the sidebar being visible.
-    st.title(labels[field])
+    # The title names what is on the map: the metric for a choropleth, the view
+    # name for "All Precincts".  `chosen` is the option the reader can see, and in
+    # metric mode it is exactly labels[field], so nothing drifts from the map.
+    st.title(chosen)
 
     try:
         features = _cached_features()["features"]
@@ -173,6 +197,8 @@ def main() -> None:
             )
             district_records = None
 
+    # `field=None` here is the "All Precincts" view: every record gets the uniform
+    # fill, so a precinct the ramp would leave transparent is painted and edged.
     fc = data_layer.decorate(features, rows, field)
     # The mask is decided from the joined CSV and applied only to what the
     # precinct layer draws: `decorate` never learns filtering exists, so colour,
@@ -186,7 +212,16 @@ def main() -> None:
     colored = sum(1 for record in fc if record["__color"] != settings.NO_DATA_COLOR)
 
     chart = st.pydeck_chart(
-        ui.build_deck(ui.visible_records(fc, visible), tooltip, features, district_records),
+        ui.build_deck(
+            ui.visible_records(fc, visible),
+            tooltip,
+            features,
+            district_records,
+            # Layer-wide edge, and only for the uniform view: a choropleth keeps
+            # `stroked=False`, so the two modes still differ in exactly the one
+            # prop this view exists to add.
+            line_colour=None if field is not None else settings.ALL_PRECINCTS_LINE_COLOR,
+        ),
         on_select="rerun",
         selection_mode="single-object",
         key="precinct_map",
@@ -194,8 +229,11 @@ def main() -> None:
         height=680,
     )
 
-    # Directly under the map, so the ramp and its range read as one unit.
-    st.html(ui.legend_html(data_layer.field_domain(rows, field)))
+    # Directly under the map, so the ramp and its range read as one unit.  Only a
+    # metric has a ramp: "All Precincts" paints one colour, so a gradient bar would
+    # describe a scale the map is not using.  field_domain is not called with None.
+    if field is not None:
+        st.html(ui.legend_html(data_layer.field_domain(rows, field)))
 
     # The [3, 2] split that used to hold the single detail panel is gone: the row of
     # two panels needs the full width, and `st.columns` nested inside another
