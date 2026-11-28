@@ -7,7 +7,7 @@ Precinct-level canvassing, election, and demographic analysis for Dallas County:
 
 ## Policy
 
-- Never commit unless the user explicitly asks. Never `git add -A`: `scratch/`, `data/raw/precinct_district_comb.csv` and the untracked `_bmad-output/plan-*.md` are untracked but not gitignored, so `-A` sweeps them. Stage paths by name.
+- Never commit on the `main` or `master` branch unless the user explicitly asks. Never `git add -A`: `scratch/`, `data/raw/precinct_district_comb.csv` and the untracked `_bmad-output/plan-*.md` are untracked but not gitignored, so `-A` sweeps them. Stage paths by name.
 - Never modify an existing file in `data/raw/` — they are the research record. New raw files get added only when the user supplies new data. `data/precinct_data.csv` and `data/data_dictionary.csv` are the only writable outputs.
 - Never hand-edit `data/data_dictionary.csv`; regenerate it with `src/build_data_dictionary.py`, or the next build silently overwrites your edit.
 - Never add `requirements.txt` — the Streamlit Cloud deploy works from `pyproject.toml` + `uv.lock` as they are, and a requirements file changes what the deploy installs.
