@@ -240,6 +240,31 @@ COLOR_LOW = VIRIDIS_STOPS[0][1]
 COLOR_HIGH = VIRIDIS_STOPS[-1][1]
 
 NO_DATA_TEXT = "\u2014"  # em-dash: no value, distinct from 0.0
+
+# How far outside 0-1 a share may sit and still be treated as one.  ACS ratios are
+# sums of quotients, so a column that is 100% somewhere can arrive as
+# 1.0000000000000002 -- `pct_single_unit` does, in 3 rows of data/precinct_data.csv,
+# while its complement `pct_multi_unit` tops out at exactly 1.0.  Read as a count,
+# that hair puts the field on the wrong axis everywhere at once: the legend prints
+# "1", the detail panel prints "1", and the filter slider spans 0-1 on a %g axis
+# instead of 0%-100%.  One column telling three stories is the defect
+# `format_value`'s docstring already records, so the tolerance is applied at BOTH
+# places that decide it -- `domain_is_share` for the field, `format_value` for the
+# value -- and never by naming the field or editing the CSV.
+#
+# It is deliberately a float hair, not a band: `canvass_attempts` tops out at 613
+# and `response_count` at 135, and both must stay counts.  Raising this toward even
+# 0.01 would make a genuine 1.5 figure read as 150%.
+SHARE_TOLERANCE = 1e-12
+
+# Float noise absorbed when a share's bound is rounded to WHOLE percentage points
+# for its filter slider (see `_slider_format`).  The axis is measured in points, so
+# one point is 1.0 here and this hair is nine orders smaller: it exists only so a
+# bound that is already a whole point -- 0.4 -> 40.0, or 1.0000000000000002 ->
+# 100.00000000000003 -- does not get nudged to the next integer by ceil/floor.
+# Rounding is always OUTWARD, so a bound can be understated by at most one point
+# and never overstate the data it covers.
+SHARE_AXIS_HAIR = 1e-9
 MAP_STYLE_URL = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
 LAYER_ID = "precincts"  # Layer(id=...) is required or selection state is unkeyed
 CACHE_TTL = 900  # seconds; the geometry is "Current" and reflows rarely
@@ -304,6 +329,29 @@ DISTRICT_SELECTOR_LABEL = "Dallas Council Districts"
 # has no overlay".  This caption is what makes the empty state legible.
 DISTRICT_NONE_HINT = "No districts selected -- no boundaries on the map."
 DEFAULT_DISTRICT_SELECTION = ["1", "2", "5", "9"]
+
+# ---------------------------------------------------------------------------
+# The sidebar's range filters.  Three chrome strings and nothing else: which
+# fields get a slider is derived from the extract (`filter_bounds` drops the
+# fields whose populated min equals its max), and each slider's endpoints come
+# from `field_domain`, so there is no range list here to keep in step with the
+# data.  A field with no bounds simply gets no widget -- the same rule
+# `detail_panel_fields` applies to NO_DATA_FIELDS -- and no caption says so.
+#
+# FILTER_SESSION_PREFIX is the whole session-state namespace for the filters,
+# which is what makes "reset" a delete rather than an assignment: writing a
+# value into a widget's key is what raises StreamlitValueAboveMaxError when the
+# persisted value falls outside a range a rebuild has since narrowed.  What the
+# prefix has to keep clear is the FILTER keys: prefix + field name is one-to-one
+# over `filter_bounds`, and each field appears once in FILTER_FIELDS, so no two
+# sliders can share a key and the per-field staleness drop only ever touches
+# keys `filter_bounds` emitted.  The app does key other widgets -- the chart is
+# `precinct_map` -- and none of them starts with this prefix, which is what keeps
+# the reset sweep off them.
+# ---------------------------------------------------------------------------
+FILTER_EXPANDER_LABEL = "Filter precincts"
+FILTER_RESET_LABEL = "Click here to reset filters"
+FILTER_SESSION_PREFIX = "f_"
 
 # ---------------------------------------------------------------------------
 # Colour legend geometry.  The swatch colours are NOT here on purpose: they come
