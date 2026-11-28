@@ -36,6 +36,10 @@ draws only survivors. A "Click here to reset filters" button restores all full r
 - Bounds come from the extract (`field_domain`), never typed-in 0–1: `canvass_attempts` is 0–613.
 - Labels come from `data_dictionary.csv` through `label_for`, never raw field names.
 - Read constants attribute-style (`settings.X`).
+- Reset seeds each field's own full range with `setdefault` at slider creation. A bare delete leaves
+  the element id intact, the browser keeps its own copy of the value, and the thumbs never move;
+  `set_value` on the outgoing proto is what the mounted Slider honours. (Amended 2026-11-27 after
+  loopback 4.)
 
 **Never:**
 - Do not touch `fetch_features`, `join_precincts`, or `decorate`'s colour/token contract; filtering
@@ -43,8 +47,10 @@ draws only survivors. A "Click here to reset filters" button restores all full r
 - Do not filter the council overlay layer.
 - Do not add a sidebar `selectbox`/`multiselect`/`html`, nor any widget before "Colour precincts
   by" — the suite asserts on those channels and on element order.
-- Do not reset by *writing* values into session state; Streamlit warns and raises
-  `StreamlitValueAboveMaxError` when a persisted value falls outside a new range. Delete keys instead.
+- Never reset by writing a *persisted* range back into session state: a value outside a new range
+  makes Streamlit raise `StreamlitValueAboveMaxError`, so a stale key must be deleted before its
+  widget exists. (Amended 2026-11-27 after loopback 4 — the original wording forbade writing at all,
+  which is what let the thumb bug through; see "Always" for the required seed.)
 - Do not emit a caption; do not edit `data/raw/`, `data/*.csv`, `TOOLTIP_FIELDS`, or delete any
   assertion in `tests/test_dashboard.py`.
 
@@ -69,7 +75,7 @@ Settled at Checkpoint 1 (2026-11-26).
 | BLANK + untouched field | full-range default | visible and uncoloured, as shipped | n/a |
 | ALL-BLANK field (the 9 in `NO_DATA_FIELDS`) | `min == max` | no slider emitted | `st.slider` would raise `StreamlitInvalidMinMaxError` |
 | STALE persisted value after a rebuild shrinks a domain | value outside new bounds | key dropped before the widget is created → slider shows the new full range | avoids `StreamlitValueAboveMaxError` |
-| RESET | click after narrowing | all `f_*` keys deleted pre-run; sliders full; nothing hidden | n/a |
+| RESET | click after narrowing | all `f_*` keys deleted pre-run; sliders re-seeded to full range, and the outgoing proto carries `set_value` so the browser moves the thumbs too; nothing hidden | n/a |
 | OFFLINE precinct service | `fetch_features` fails | unchanged single `st.error`, zero filter widgets | existing path |
 
 </frozen-after-approval>
@@ -269,13 +275,17 @@ with `value=None` the widget infers single-vs-range from the key, so seeding fir
 occupy it, get deleted, and leave Streamlit building a single slider — `chosen[0]` then dies with
 `'int' object is not subscriptable` (mutation-tested).
 
-**Freezes amended — needs human acknowledgement:**
-- `## Boundaries & Constraints` → "Do not reset by *writing* values into session state … Delete keys
-  instead." `filter_reset` still deletes; nothing writes a *stale* value. But the reset's visible
-  effect now depends on a write of the *default*, which the sentence as written forbids. The stated
-  reason for the rule — `StreamlitValueAboveMaxError` from a persisted value outside a new range — is
-  untouched and still handled by `_forget_stale_range`. Deletion alone cannot fix this bug; the
-  `set_value` contract requires the key to be newly written.
+**Freezes amended (human authorised 2026-11-27, "amend the constraint text"):**
+- `## Boundaries & Constraints` no longer forbids writing outright. The conflated case is split:
+  **Never** covers writing a *persisted* range back (still the `StreamlitValueAboveMaxError` the
+  original sentence was reaching for, still handled by `_forget_stale_range`), and **Always** gained
+  the positive requirement the bug turned on — seed each field's own full range with `setdefault` at
+  creation, because `set_value` is the only thing a mounted Slider honours.
+- The `RESET` matrix row gained the seed and the `set_value` requirement as its expected behaviour.
+- Loopback 1's KEEP instruction #3 ("never writes them") marked superseded in place rather than
+  rewritten, so the sequence of decisions stays readable.
+- Pass-2 triage finding #3's "the frozen rule is honoured" is left as written: it was true of the
+  code at that date, and the triage log is a record, not a spec.
 - The duplication warning the rule also cites is sidestepped rather than suppressed: with
   `value=None` there is no explicit default, and `check_session_state_rules` only warns when one is
   passed alongside a new state value.
@@ -367,7 +377,9 @@ legend by 100x; a default load that silently hides precincts; an unreachable upp
 2. Keep the dtype rule reading the field's **values**, not just its endpoints (3 int / 5 float
    split, pinned live; an endpoints-only rule strands `pct_renter_occupied` on 0 and 1).
 3. Keep: bounds from `field_domain`; the 9 `NO_DATA_FIELDS` get no slider (Q1a); reset **deletes**
-   `f_*` keys from an `on_click` callback and never writes them; `visible_precincts` returns `None`
+   `f_*` keys from an `on_click` callback and never writes them *(superseded by loopback 4: delete
+   the persisted key, but seed the field's own full range with `setdefault` at creation — a bare
+   delete leaves the thumbs unmoved)*; `visible_precincts` returns `None`
    when nothing is narrowed and `visible_records` returns its input list object; `decorate`,
    `fetch_features`, `build_deck` and the tooltip contract untouched; no new caption/selectbox/
    multiselect/html in the sidebar; no committed `data/` edit and nothing deleted from the suite.
@@ -433,20 +445,24 @@ Pass 1 (review: quick, lens `quick`, model same as session; diff `/tmp/dashboard
 ## Verification
 
 **Commands:**
-- `uv run python tests/test_dashboard.py` — expected: **62 `PASS`** lines above the known abort
+- `uv run python tests/test_dashboard.py` — expected: **64 `PASS`** lines above the known abort
   (27 at baseline), still failing with `AssertionError: Precinct {NewPrcnt}` — the assertion
-  itself, unmodified, now at `tests/test_dashboard.py:1534`. The abort is expected and must not be
+  itself, unmodified, now at `tests/test_dashboard.py:1588`. The abort is expected and must not be
   chased; a green exit is not achievable while `TOOLTIP_FIELDS` is empty.
-- `uv run streamlit run src/dashboard.py` — expected: "Filter precincts" expander, 32 sliders at
-  full range below the district menu; share sliders reading WHOLE percent (e.g. `0%`…`100%`,
-  `0%`…`40%` for `pct_vacant`, `15%`…`100%` for `2026_gov_percent_Hinojosa`) with step-1 handles;
-  count sliders reading bare integers (`0`…`613`).
-- `git diff --numstat 6397d65 -- src tests` — expected: 5 files, everything additive except the
-  `build_deck` call line rewritten to wrap `fc` and the loopback-2 share-axis block in
-  `_slider_format`; `git status --porcelain data` empty.
+- `uv run streamlit run src/dashboard.py` — expected: "Filter precincts" expander, reset button
+  first, then 32 sliders at full range below the district menu; share sliders reading WHOLE percent
+  (e.g. `0%`…`100%`, `0%`…`40%` for `pct_vacant`, `15%`…`100%` for `2026_gov_percent_Hinojosa`) with
+  step-1 handles; count sliders reading bare integers (`0`…`613`).
+- `git diff --numstat 6397d65 -- src tests` — expected: 5 files, pure additions in `src/settings.py`,
+  `src/utils/streamlit.py` (new) and `tests/test_dashboard.py`; exactly **4 deleted lines** elsewhere
+  — the `build_deck` call in `src/dashboard.py` rewritten to wrap `fc`, and `format_value`'s two
+  exact-band lines plus `domain_is_share`'s in `data_layer.py`, replaced by the `SHARE_TOLERANCE`
+  forms (545a5b7). `git status --porcelain data` empty.
 
 **Manual checks:**
-- Narrow a slider, watch polygons vanish; click reset, watch all return with no warning. Drag a
-  share handle and confirm it snaps to whole points and its label has no decimals. The legend under
-  the map keeps one decimal (`40.0%` against a handle reading `40%`) — same scale, not the same
-  string; a whole-point handle cannot express the legend's fraction.
+- Narrow a slider, watch polygons vanish; click reset, watch **the thumbs as well as the map** return
+  with no warning. Drag a share handle and confirm it snaps to whole points and its label has no
+  decimals. The legend under the map keeps one decimal (`40.0%` against a handle reading `40%`) —
+  same scale, not the same string; a whole-point handle cannot express the legend's fraction.
+- Narrow two sliders, reset, then move one of them again: the other must come back at its full range
+  rather than resurrecting its old narrowed pair (the loopback-4 symptom).

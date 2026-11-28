@@ -1352,10 +1352,12 @@ assert _untouched_blank_kept, "sample has no blank on an untouched field -- pick
 ok("AC2: one narrowed slider draws exactly the survivors, blanks dropped",
    f"{len(_got_n)} of {len(_FILTER_CODES)} polygons, {len(_blank_in_codes)} blanks hidden")
 
-# AC3: narrowed, then reset.  The callback DELETES the f_* keys (it must not write
-# them -- a write into a live widget's key is the StreamlitValueAboveMaxError this
-# plan forbids), so the next render reads full ranges and hides nothing, with no
-# warning and no exception anywhere in the run.
+# AC3: narrowed, then reset.  The callback DELETES the f_* keys, and filter_sliders then
+# SEEDS each field's own full range with setdefault at creation -- the seed is what raises
+# proto set_value so the browser moves the thumbs (see the check below; writing a PERSISTED
+# range is still what StreamlitValueAboveMaxError forbids, and _forget_stale_range drops
+# those first).  The next render reads full ranges and hides nothing, with no warning and
+# no exception anywhere in the run.
 _seen_reset = []
 dashboard._cached_features = lambda *_a2, **_k2: _FILTER_FC
 dashboard._cached_council_features = lambda *_a2, **_k2: _FILTER_COUNCIL
