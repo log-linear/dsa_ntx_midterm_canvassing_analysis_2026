@@ -256,6 +256,15 @@ NO_DATA_TEXT = "\u2014"  # em-dash: no value, distinct from 0.0
 # and `response_count` at 135, and both must stay counts.  Raising this toward even
 # 0.01 would make a genuine 1.5 figure read as 150%.
 SHARE_TOLERANCE = 1e-12
+
+# Float noise absorbed when a share's bound is rounded to WHOLE percentage points
+# for its filter slider (see `_slider_format`).  The axis is measured in points, so
+# one point is 1.0 here and this hair is nine orders smaller: it exists only so a
+# bound that is already a whole point -- 0.4 -> 40.0, or 1.0000000000000002 ->
+# 100.00000000000003 -- does not get nudged to the next integer by ceil/floor.
+# Rounding is always OUTWARD, so a bound can be understated by at most one point
+# and never overstate the data it covers.
+SHARE_AXIS_HAIR = 1e-9
 MAP_STYLE_URL = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
 LAYER_ID = "precincts"  # Layer(id=...) is required or selection state is unkeyed
 CACHE_TTL = 900  # seconds; the geometry is "Current" and reflows rarely

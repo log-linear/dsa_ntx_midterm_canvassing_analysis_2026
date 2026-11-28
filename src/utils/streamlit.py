@@ -16,6 +16,7 @@ and there is none.
 
 from __future__ import annotations
 
+import math
 from typing import Any, cast
 
 import streamlit as st
@@ -253,31 +254,32 @@ def _slider_format(
 ) -> tuple:
     """`(dtype, axis_lo, axis_hi, step, format, scale)` for one field's slider.
 
-    A share is drawn on a PERCENT-POINT axis: `st.slider` applies `format` as a
+    A share is drawn on a WHOLE PERCENT-POINT axis: `st.slider` applies `format` as a
     literal printf to the widget's own value, and shares are stored 0-1, so a 0-1
-    widget formatted "%.1f%%" renders `0.4%` where `legend_html` renders `40.0%`
-    -- the same field labelled two ways, 100x apart.  So a share's axis is
-    `lo*100`..`hi*100` with `scale` 100.0, and `filter_sliders` divides the value
-    back out.  The mask, `filter_bounds` and every comparison therefore stay in the
-    field's native unit; only the widget knows about the axis.
+    widget renders `0.4` where `legend_html` renders `40.0%` -- the same field labelled
+    two ways, 100x apart.  So a share's axis is `lo*100`..`hi*100` ROUNDED OUTWARD to
+    integers -- floor down, ceil up, clamped to 0-100 -- with `scale` 100.0, step 1 and
+    format "%d%%", and `filter_sliders` divides the value back out.  Rounding outward
+    is what keeps an untouched slider inert: a populated maximum of 39.645% gets an
+    axis end of 40, so the handle at rest still covers the bound instead of stranding
+    it.  The mask, `filter_bounds` and every comparison therefore stay in the field's
+    native unit; only the widget knows about the axis.
 
-    dtype is int when BOTH endpoints are integral AND every populated value is one,
-    for a NON-share field.  Endpoints alone cannot carry that decision: five share
-    fields legitimately span exactly 0.0-1.0 -- `pct_renter_occupied` among them,
-    with 798 of its 817 populated rows holding a fraction -- so an int slider there
-    would offer 0 and 1 only, and the only narrowing it could express would hide
-    every one of those 798.  That is the plan's own headline example made
-    unreachable, so the integrality test reads the field's VALUES, not its bounds.
-    An int step always divides the span (`_span_divisor`), so the bound is a
-    position the handle can actually reach; non-integer floats keep `span/100`.
+    dtype is int for a share, and otherwise when BOTH endpoints are integral AND every
+    populated value is one.  Endpoints alone cannot carry that non-share decision: a
+    native-unit field spanning 0.0-1.0 with fractional values would get an int slider
+    offering 0 and 1 only, and the only narrowing it could express would hide
+    everything between.  A share escapes that because its axis has 100 positions rather
+    than 2, which is exactly why the whole-point requirement is safe there.  An int
+    step always divides the span (`_span_divisor`), so the bound is a position the
+    handle can actually reach; non-integer floats keep `span/100`.
 
     `format` is always a printf string: it ships in a protobuf string field, so a
     callable dies with TypeError (the `@@=` lesson of fc08df5, one layer up).  It
-    follows the axis -- "%.1f%%" on the percent-point axis, "%d" for integer-valued
+    follows the axis -- "%d%%" on the whole percent-point axis, "%d" for integer-valued
     fields, "%g" otherwise -- which is the same `domain_is_share` decision
-    `legend_html` makes, so slider and legend read alike.  `scale` is the only thing
-    that knows the axis exists: `filter_sliders` divides by it, so the field's
-    native unit is what the rest of the app ever sees.
+    `legend_html` makes, so slider and legend agree on scale (the legend keeps one
+    decimal, the slider cannot, since it only ever sits on a whole point).
     """
     lo, hi = bound
     span = hi - lo
@@ -286,8 +288,21 @@ def _slider_format(
         v == int(v) for v in (data_layer.to_float(r.get(field)) for r in rows) if v is not None
     )
     if data_layer.domain_is_share(bound):
-        axis_lo, axis_hi = lo * 100.0, hi * 100.0
-        return float, axis_lo, axis_hi, (axis_hi - axis_lo) / 100.0, "%.1f%%", 100.0
+        # WHOLE percentage points, rounded OUTWARD: floor down at the low end and
+        # ceil up at the high end, so a bound of 39.645% becomes an axis of 0-40
+        # rather than 0-39 -- rounding in would put the populated maximum off the
+        # end of the scale and make a slider nobody touched hide precincts.  The
+        # hair absorbs a bound that is already a whole point (40.0 exactly), which
+        # naive ceil would otherwise push to 41.
+        axis_lo = max(0, min(100, math.floor(lo * 100.0 + settings.SHARE_AXIS_HAIR)))
+        axis_hi = max(0, min(100, math.ceil(hi * 100.0 - settings.SHARE_AXIS_HAIR)))
+        if axis_hi <= axis_lo:  # a span narrower than one percentage point
+            axis_hi = min(100, axis_lo + 1)
+            axis_lo = max(0, axis_hi - 1)
+        # int dtype with step 1 is what makes the handles move in whole points and
+        # the labels print without decimals; `scale` still divides them back to the
+        # field's native unit for the mask.
+        return int, axis_lo, axis_hi, 1, "%d%%", 100.0
     if whole:
         return (
             int,
@@ -301,7 +316,9 @@ def _slider_format(
     return float, float(lo), float(hi), span / 100.0, fmt, 1.0
 
 
-def _forget_stale_range(field: str, axis_bound: tuple[float, float]) -> None:
+def _forget_stale_range(
+    field: str, axis_bound: tuple[float, float], integral: bool = False
+) -> None:
     """Delete a persisted `f_<field>` value that no longer fits `axis_bound`.
 
     Runs immediately BEFORE that field's `st.slider` is created, which is the
@@ -319,6 +336,16 @@ def _forget_stale_range(field: str, axis_bound: tuple[float, float]) -> None:
     and survives, and a legitimate axis 45.0 reads as "far outside" and is thrown
     away.  `filter_sliders` scales before calling, so the two sides always match.
 
+    `integral` marks an axis whose step is 1, i.e. one holding WHOLE percentage
+    points or whole counts.  Being inside the range is not enough there: Streamlit
+    accepts an off-step persisted value without warning and hands it straight back,
+    so a 20.5 left over from an earlier float axis would filter at 20.5% while
+    `"%d%%"` printed "20%" -- the label and the mask disagreeing by the fraction the
+    label cannot show.  Treating a non-integral pair as stale drops it, and the
+    slider comes back at its own full range rather than lying about one precinct's
+    worth of data.  It also keeps the handles on whole points, which is the point of
+    the axis.
+
     Bare-mode safe: with no run context the session-state proxy raises, and an
     unkeyed widget has nothing persisted anyway, so this is a no-op there.
     """
@@ -332,7 +359,9 @@ def _forget_stale_range(field: str, axis_bound: tuple[float, float]) -> None:
     lo, hi = axis_bound
     try:
         stale = current[0] < lo or current[1] > hi
-    except (TypeError, IndexError):
+        if integral and not stale:
+            stale = any(float(v) != int(float(v)) for v in current[:2])
+    except (TypeError, IndexError, ValueError):
         stale = True
     if stale:
         try:
@@ -391,7 +420,7 @@ def filter_sliders(
         dtype, lo, hi, step, fmt, scale = _slider_format(field, bound, dictionary, rows)
         # Like with like: session state holds the AXIS value, so the staleness
         # test has to run on the axis too, not on the native bound.
-        _forget_stale_range(field, (lo, hi))
+        _forget_stale_range(field, (lo, hi), dtype is int)
         chosen = st.slider(
             label,
             min_value=dtype(lo),

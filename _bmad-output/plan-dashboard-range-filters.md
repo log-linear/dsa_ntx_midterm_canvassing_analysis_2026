@@ -186,13 +186,23 @@ loudly, so none is vacuous.
   it moves **inside** its bound by more than a relative tolerance (`span * 1e-9`).
 - Step size must leave the populated maximum reachable: for an integer-valued field the step is the
   largest divisor of the span not exceeding `round(span/100)`, never a bare `max(1, round(...))`.
-- **Slider axis for a share field is 0-100, not 0-1.** `st.slider`'s `format` is a literal printf
-  string applied to the widget's own value, and there is no callable form (a lambda dies in the
-  protobuf field), so a 0-1 field formatted `"%.1f%%"` prints `0.4%` where `legend_html` prints
-  `40.0%`. Shares are therefore put on a percent-point axis (`lo*100`…`hi*100`) with `"%.1f%%"`,
-  and `filter_sliders` divides the chosen range back by 100 before returning it, so the mask,
-  `filter_bounds` and every comparison stay in the field's native 0-1 unit. Non-share floats read
-  `"%g"`; integer-valued fields read `"%d"`.
+- **Slider axis for a share field is whole percent-points, 0-100, not 0-1.** `st.slider`'s
+  `format` is a literal printf string applied to the widget's own value, and there is no callable
+  form (a lambda dies in the protobuf field), so a 0-1 field formatted `"%.1f%%"` prints `0.4%`
+  where `legend_html` prints `40.0%`. Shares are therefore put on a percent-point axis with
+  `scale` 100.0, and `filter_sliders` divides the chosen range back by 100 before returning it, so
+  the mask, `filter_bounds` and every comparison stay in the field's native 0-1 unit. Non-share
+  floats read `"%g"`; integer-valued fields read `"%d"`.
+- **Amended (Loopback 2, user request): that axis is INTEGER — `floor(lo*100)` … `ceil(hi*100)`,
+  clamped 0-100, `step=1`, `dtype=int`, `format="%d%%"`.** No decimal labels, no sub-point drags.
+  Rounding is **outward** so the axis always CONTAINS the populated bound; rounding in would strand
+  a 39.645% maximum off the end of the scale and make a slider nobody touched hide precincts. A
+  `1e-9` hair (`settings.SHARE_AXIS_HAIR`) keeps a bound that IS a whole point from gaining a
+  spurious extra point to `0.07*100 == 7.000000000000001`. The legend keeps one decimal; the
+  slider cannot, because it only ever sits on a whole point — they now agree on *scale*, not
+  character-for-character. A persisted non-integral range on an integral axis counts as STALE
+  (`_forget_stale_range(integral=True)`): Streamlit accepts it silently, and `"%d%%" % 20.5` prints
+  `20%` while filtering at 20.5% — a label lying by the fraction it cannot display.
 - Slider `format` and legend formatting stay coupled through `domain_is_share` — the same decision
   `legend_html` makes, so the two can never label one field's endpoints differently.
 
@@ -227,6 +237,41 @@ and the tolerance's *magnitude* is pinned on synthetic domains, because no field
 sits between `1e-12` and `1.01`, so nothing else would notice an over-wide band being opened.
 
 ## Plan Change Log
+
+### Loopback 2 — 2026-11-27, user request after `df5e238`/`545a5b7`
+
+**Changed:** share sliders show WHOLE percentage points only — no decimal labels, no fractional
+adjustments. `## Design Notes` share-axis bullet amended above.
+
+**Why the plan was not wrong:** loopback 1 put shares on a 0-100 float axis with `"%d%%"`-adjacent
+`"%.1f%%"` and `step = span/100`, which is the finest granularity a slider can carry, not the
+coarsest the reader asked for. The requirement changed, not the defect.
+
+**Folded in while implementing:**
+- Outward rounding (`floor`/`ceil`) is load-bearing for the frozen "default = zero precincts
+  hidden", not cosmetic: rounding in clips a bound and re-opens loopback 1 finding #2 through a
+  different door. Verified: 28 of 29 share axes contain their bound exactly; the one that cannot
+  is `pct_single_unit`, whose bound is the artifact `1.0000000000000002` above the 100 clamp —
+  which is why `visible_precincts`' `span * 1e-9` membership tolerance stays.
+- `settings.SHARE_AXIS_HAIR = 1e-9` absorbs binary noise at exact points. Pinned synthetically
+  (`0.07*100` and `0.29*100` drift to opposite sides, and no field in this extract sits where the
+  hair matters), because with the hair at `0.0` the suite is otherwise fully green while every
+  whole-point share bound gains a spurious point.
+- `_forget_stale_range` gains `integral=`: a persisted non-whole pair inside an int axis is now
+  stale. Streamlit does not reject it — it stores it and returns it verbatim — so the label and
+  the mask disagree by the fraction the label cannot print.
+- Three tests renamed for the new arithmetic (`slider dtype follows the field's values…`,
+  `share sliders display the legend's own percentage string…`, `endpoint holders stay visible: 5
+  drifting share fields…`); their substance survives in the whole-point blocks plus the outward
+  containment sweep. Baseline differential re-run the same way as loopback 1 — pristine `HEAD`
+  worktree, abort neutralised identically in both, `comm` on sorted PASS names — no check dropped.
+- One test-side bug found and fixed while writing these: `Slider.data_type` is a protobuf ENUM
+  (`INT=0`), so `== "int"` compares against the absent-default repr and reads false.
+
+**Suite:** 58 → **62 PASS** above the unchanged `TOOLTIP_FIELDS` abort. Mutation-tested: step 2,
+format `%.1f%%`, round-in axes, `SHARE_AXIS_HAIR = 0`, and dropping `integral=` each fail the
+suite. Live AppTest: 32 sliders, zero exceptions/warnings, share handles at step 1 with
+decimal-free labels, `pct_vacant` 39-40 keeps precinct 3041, reset restores full ranges.
 
 ### Loopback 1 — 2026-11-27, triggered by review pass 1 findings #1 and #2 (both `high`)
 
@@ -321,15 +366,20 @@ Pass 1 (review: quick, lens `quick`, model same as session; diff `/tmp/dashboard
 ## Verification
 
 **Commands:**
-- `uv run python tests/test_dashboard.py` — expected: **55 `PASS`** lines above the known abort
+- `uv run python tests/test_dashboard.py` — expected: **62 `PASS`** lines above the known abort
   (27 at baseline), still failing with `AssertionError: Precinct {NewPrcnt}` — the assertion
-  itself, unmodified, now at `tests/test_dashboard.py:1340`. The abort is expected and must not be
+  itself, unmodified, now at `tests/test_dashboard.py:1534`. The abort is expected and must not be
   chased; a green exit is not achievable while `TOOLTIP_FIELDS` is empty.
 - `uv run streamlit run src/dashboard.py` — expected: "Filter precincts" expander, 32 sliders at
-  full range below the district menu; share sliders reading percent (e.g. `0.0%`…`100.0%`).
-- `git diff --numstat 6397d65 -- src tests` — expected: 5 files, **1 deletion** (the `build_deck`
-  call line rewritten to wrap `fc`), everything else additive; `git status --porcelain data` empty.
+  full range below the district menu; share sliders reading WHOLE percent (e.g. `0%`…`100%`,
+  `0%`…`40%` for `pct_vacant`, `15%`…`100%` for `2026_gov_percent_Hinojosa`) with step-1 handles;
+  count sliders reading bare integers (`0`…`613`).
+- `git diff --numstat 6397d65 -- src tests` — expected: 5 files, everything additive except the
+  `build_deck` call line rewritten to wrap `fc` and the loopback-2 share-axis block in
+  `_slider_format`; `git status --porcelain data` empty.
 
 **Manual checks:**
-- Narrow a slider, watch polygons vanish; click reset, watch all return with no warning. Confirm the
-  slider's own endpoint labels match the legend under the map for a share field.
+- Narrow a slider, watch polygons vanish; click reset, watch all return with no warning. Drag a
+  share handle and confirm it snaps to whole points and its label has no decimals. The legend under
+  the map keeps one decimal (`40.0%` against a handle reading `40%`) — same scale, not the same
+  string; a whole-point handle cannot express the legend's fraction.

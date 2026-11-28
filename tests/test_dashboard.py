@@ -592,24 +592,25 @@ assert ui.visible_records(_mixed, {"9999"}) == []
 ok("visible_records hides a keyless record, raises only when NO record can name itself",
    f"{len(_wide)} of {len(_mixed)} mixed records kept, all-missing payload raises")
 
-# The dtype decision, pinned because it is the one filter defect that CANNOT be
-# caught by the mask checks: an int slider over a fractional field still hides
-# exactly what it is told to, it just cannot be told anything useful.  Five share
-# fields legitimately span 0.0-1.0, whose endpoints are integral, so a rule that
-# read only the endpoints would make them int sliders with step 1 -- offering 0 and
-# 1, where the only narrowing available hides every fractional precinct.  That
-# would strand the app's own headline use, "precincts above 40% renter-occupied".
-# So the test is on the emitted widget, not on the helper's return value: dtype +
-# step, plus the claim that a midpoint narrowing is actually reachable on the slider.
+# Granularity is the one filter defect that CANNOT be caught by the mask checks: a
+# slider with too few positions still hides exactly what it is told to, it just cannot
+# be told anything useful.  Two axes, two rules:
+#   * a COUNT in its native unit must not be made int when it holds fractions -- step 1
+#     over 0.0-1.0 would offer 0 and 1 only, stranding "above 40% renter-occupied";
+#   * a SHARE rides a 0-100 WHOLE-PERCENTAGE-POINT axis, so int step 1 is correct there
+#     *because* the axis has 100 positions rather than 2.  Rounding is OUTWARD, so the
+#     bound stays inside the scale and an untouched slider cannot hide a precinct.
 _INT_FIELDS = {"canvass_attempts", "strong_no", "response_count"}
 assert _INT_FIELDS <= set(filter_bounds), sorted(_INT_FIELDS - set(filter_bounds))
+_share_set = {f for f, (lo, hi) in filter_bounds.items() if data_layer.domain_is_share((lo, hi))}
+assert len(_share_set) == 29, sorted(_share_set)
+# The count fields whose native bounds are integral but whose VALUES are fractional:
+# an endpoints-only rule would wrongly make these int.  Shares are excluded because
+# they are int on purpose, on the point axis.
 _endpoint_integral = {
     f for f, (lo, hi) in filter_bounds.items() if lo == int(lo) and hi == int(hi)
 }
-assert _INT_FIELDS < _endpoint_integral, (
-    f"nothing disagrees with an endpoints-only rule any more: {_endpoint_integral}")
-_fractional_shares = sorted(_endpoint_integral - _INT_FIELDS)
-assert len(_fractional_shares) == 5, _fractional_shares
+_fractional_native = sorted((_endpoint_integral - _INT_FIELDS) - _share_set)
 for _f in _INT_FIELDS:
     _dtype, _lo, _hi, _step, _fmt, _scale = ui._slider_format(
         _f, filter_bounds[_f], dictionary, rows
@@ -626,40 +627,77 @@ for _f in _INT_FIELDS:
         data_layer.to_float(r.get(_f)) == int(data_layer.to_float(r.get(_f)))
         for r in rows if data_layer.to_float(r.get(_f)) is not None
     ), f"{_f} is offered as an integer slider but holds a fraction"
-for _f in _fractional_shares:
-    _dtype, _lo, _hi, _step, _fmt, _scale = ui._slider_format(
-        _f, filter_bounds[_f], dictionary, rows
-    )
-    assert _dtype is float, (
-        f"{_f} span {filter_bounds[_f]} has integral endpoints but fractional values -- an int "
-        f"slider there leaves only {int(filter_bounds[_f][0])} and {int(filter_bounds[_f][1])}")
-    # DEFECT 1 GUARD, at the helper: a share rides a 0-100 percent-point axis, so
-    # the widget's own endpoints are 100x the field's native bound and `scale` is
-    # what divides them back out.  A 0-1 axis here is what made the slider print
-    # `0.4%` while the legend printed `40.0%`.
-    assert _scale == 100.0, (_f, _scale)
-    assert abs(_lo - filter_bounds[_f][0] * 100) < 1e-9 and abs(
-        _hi - filter_bounds[_f][1] * 100) < 1e-9, (_f, _lo, _hi, filter_bounds[_f])
-    assert _fmt == "%.1f%%", (_f, _fmt)
-    # The step is expressed on that same axis, so it is judged against the axis
-    # span: fine granularity, and the far end reachable from the near end.
-    assert 0 < _step < (_hi - _lo) / 2.0, (_f, _step, _lo, _hi)
-# The headline case, stated as a reachable widget position rather than a property.
-# On the percent axis "40% renter-occupied" IS position 40 -- which is the whole
-# point of the axis: the reader drags to the number the legend prints.
+assert not _fractional_native, (
+    f"native-unit fields with integral bounds but fractional values must stay float: "
+    f"{_fractional_native}")
+
+# THE WHOLE-POINT REQUIREMENT, at the helper, for every share: int endpoints, step
+# exactly 1 (so no sub-point adjustment is possible), a decimal-free format, and
+# bounds rounded OUTWARD -- floor down, ceil up -- so the populated range is covered
+# rather than clipped.  Clamped to 0-100 because a share cannot mean more.
+for _f in sorted(_share_set):
+    _lo, _hi = filter_bounds[_f]
+    _dtype, _alo, _ahi, _step, _fmt, _scale = ui._slider_format(_f, (_lo, _hi), dictionary, rows)
+    assert _dtype is int and _step == 1 and _fmt == "%d%%" and _scale == 100.0, (
+        _f, _dtype, _alo, _ahi, _step, _fmt, _scale)
+    assert _alo == int(_alo) and _ahi == int(_ahi), (_f, _alo, _ahi)
+    assert 0 <= _alo < _ahi <= 100, (_f, _alo, _ahi)
+    assert _fmt % _alo == f"{_alo}%" and _fmt % _ahi == f"{_ahi}%", (_f, _alo, _ahi)
+    # outward: the axis CONTAINS the bound...
+    assert _alo / 100.0 <= _lo + 1e-12 and _ahi / 100.0 >= _hi - 1e-12, (_f, _alo, _ahi, _lo, _hi)
+    # ...and never by more than one point, so a 39.6% field stops at 40 and not 100.
+    assert _ahi / 100.0 - _hi < 0.01 and _lo - _alo / 100.0 < 0.01, (_f, _alo, _ahi, _lo, _hi)
+    assert (_ahi - _alo) % _step == 0, (_f, _alo, _ahi, _step)
+# An untouched whole-point axis must still read as inert through the real round trip
+# (axis -> filter_sliders' /100 -> mask), or rounding would hide precincts on load.
+for _f in sorted(_share_set):
+    _lo, _hi = filter_bounds[_f]
+    _dt, _alo, _ahi, _st, _fmt, _sc = ui._slider_format(_f, (_lo, _hi), dictionary, rows)
+    assert data_layer.visible_precincts(
+        rows, filter_bounds, {_f: (_alo / _sc, _ahi / _sc)}) is None, (
+        f"{_f}: an untouched rounded axis registered as a narrowing")
+ok("share sliders use whole percentage points, bounds rounded outward and inert",
+   f"{len(_share_set)} share fields, int step 1, '%d%%', outward-rounded bounds")
+
+# A span narrower than one percentage point must not collapse to an empty axis (which
+# would raise StreamlitInvalidMinMaxError); it gets the single point it can show.
+_tiny = ui._slider_format("x", (0.0001, 0.0002), dictionary, rows)
+assert _tiny[1] == 0 and _tiny[2] == 1, _tiny
+_t2 = ui._slider_format("x", (0.99995, 0.99999), dictionary, rows)
+assert _t2[1] == 99 and _t2[2] == 100, _t2
+ok("a sub-one-point share span still gets a non-degenerate axis", "0-1 and 99-100")
+
+# The HAIR's own job, pinned synthetically.  `lo*100`/`hi*100` are not exact even when
+# the bound IS a whole point: 0.07*100 == 7.000000000000001 and 0.29*100 ==
+# 28.999999999999996.  With a zero hair, ceil pushes the first axis to 8 and floor pulls
+# the second to 28 -- a scale one point wider than the data on both sides, so an
+# untouched slider covers percentages that do not exist.  Nothing in this extract sits
+# there (`pct_single_unit`'s artifact is absorbed by the 100 clamp and
+# `pct_hs_or_less`'s hair sits under even a zero floor), so the arithmetic needs a
+# direct probe rather than a real field: settings.SHARE_AXIS_HAIR = 0 fails here.
+_ha = ui._slider_format("x", (0.0, 0.07), dictionary, rows)
+assert 0.07 * 100.0 > 7.0, "0.07 no longer drifts above its point; this probe proves nothing"
+assert _ha[2] == 7, f"an exact 7% bound must ceil to 7, not widen to {_ha[2]}"
+_hb = ui._slider_format("x", (0.29, 1.0), dictionary, rows)
+assert 0.29 * 100.0 < 29.0, "0.29 no longer drifts below its point; this probe proves nothing"
+assert _hb[1] == 29, f"an exact 29% bound must floor to 29, not widen to {_hb[1]}"
+ok("a bound that IS a whole point stops there: no spurious extra point",
+   f"0.07 -> hi {_ha[2]}, 0.29 -> lo {_hb[1]} (hair {settings.SHARE_AXIS_HAIR})")
+
+# The headline case as a reachable widget position: "above 40% renter-occupied" IS
+# handle position 40 on the point axis, with no decimals anywhere.
 _ren = filter_bounds["pct_renter_occupied"]
 _r_dtype, _r_lo, _r_hi, _r_step, _r_fmt, _r_scale = ui._slider_format(
     "pct_renter_occupied", _ren, dictionary, rows
 )
-assert _r_dtype is float and _r_scale == 100.0 and _r_step <= 1.0, (
-    _r_dtype, _r_scale, _r_step)
-assert _r_lo <= 40.0 <= _r_hi and round((_r_hi - _r_lo) / _r_step) >= 40, (
-    "40% is not a position this slider can land on", _r_step, _r_lo, _r_hi)
+assert (_r_dtype, _r_lo, _r_hi, _r_step, _r_scale) == (int, 0, 100, 1, 100.0), (
+    _r_dtype, _r_lo, _r_hi, _r_step, _r_scale)
+assert _r_fmt % 40 == "40%", _r_fmt % 40
 assert data_layer.visible_precincts(
     rows, filter_bounds, {"pct_renter_occupied": (40.0 / _r_scale, _r_hi / _r_scale)}
 ) is not None, "the headline narrowing does not register"
-ok("slider dtype follows the field's values, not merely its endpoints",
-   f"{len(_INT_FIELDS)} int / {len(_fractional_shares)} float of {len(filter_bounds)}")
+ok("slider granularity stays usable: 100 whole positions, headline 40% reachable",
+   f"{len(_INT_FIELDS)} count-int / {len(_share_set)} share-point of {len(filter_bounds)}")
 
 # Matrix NARROWED, second clause: a hidden precinct "stays in the panels' index".
 # Q2(a) freezes that the mask reaches the DECK ONLY, so a precinct a filter hid
@@ -741,6 +779,12 @@ _FILTER_SCRIPT = "import dashboard\ndashboard.main()\n"
 # own, which it builds.  Re-imported here because the suite's own binding sits at
 # :1749, below the abort, and this section cannot depend on it having run.
 from streamlit.testing.v1 import AppTest  # noqa: E402
+# Slider.data_type is a protobuf ENUM (INT=0, FLOAT=1), not a string: comparing it
+# to "int" is comparing against its absent default repr and reads false for an int
+# slider.  Resolve the real symbol so the whole-point dtype assertion means what it says.
+from streamlit.proto.Slider_pb2 import Slider as _SliderProto  # noqa: E402
+
+_INT_AXIS = _SliderProto.DataType.Value("INT")
 
 
 def render_filters(seeded=None):
@@ -865,9 +909,10 @@ ok("the expander's OWN subtree holds all 32 sliders and the reset button",
    f"{settings.FILTER_EXPANDER_LABEL!r}")
 
 # Every slider is created at its own full range, expressed ON THE WIDGET'S AXIS:
-# a share spans 0-100 percent-points, a count spans its own native numbers.
+# a share spans whole percentage points, a count spans its own native numbers.
 # `_slider_format`'s scale is what maps one to the other, so the axis endpoints are
-# asserted here against bound*scale rather than against the raw bound.
+# asserted here against the rounded axis rather than against the raw bound -- the
+# axis is deliberately WIDER than the bound for a share whose ends are not whole.
 _AXIS = {
     _f: ui._slider_format(_f, _b, dictionary, rows)[1:3] for _f, _b in filter_bounds.items()
 }
@@ -876,30 +921,54 @@ for _f, (_lo, _hi) in filter_bounds.items():
     _alo, _ahi = _AXIS[_f]
     assert _close(_s.min, _alo) and _close(_s.max, _ahi), (_f, _s.min, _s.max, _alo, _ahi)
     assert _close(_s.value[0], _alo) and _close(_s.value[1], _ahi), (_f, _s.value, _alo, _ahi)
-    assert _s.proto.format in ("%.1f%%", "%d", "%g"), (_f, _s.proto.format)
-    assert (_s.proto.format == "%.1f%%") == data_layer.domain_is_share(filter_bounds[_f]), (
-        _f, _s.proto.format)
+    _share = data_layer.domain_is_share(filter_bounds[_f])
+    # WHOLE POINTS, asserted on the EMITTED widget: an int dtype, a step of exactly 1
+    # so no sub-point adjustment is possible, and a decimal-free label.
+    assert _s.proto.format in (("%d%%" if _share else "%d"), "%g"), (_f, _s.proto.format)
+    assert (_s.proto.format == "%d%%") == _share, (_f, _s.proto.format)
+    if _share:
+        assert _s.proto.data_type == _INT_AXIS, (_f, _s.proto.data_type)
+        assert _close(_s.step, 1), (_f, _s.step)
+        assert float(_alo) == int(_alo) and float(_ahi) == int(_ahi), (_f, _alo, _ahi)
+        assert 0 <= _alo < _ahi <= 100, (_f, _alo, _ahi)
+        # outward, never clipped: the bound sits inside the axis
+        assert _alo / 100.0 <= _lo + 1e-12 and _ahi / 100.0 >= _hi - 1e-12, (
+            _f, _alo, _ahi, _lo, _hi)
 ok("each slider is created across its own full range, on its own axis",
-   f"{len(filter_bounds)} sliders at full range")
+   f"{len(filter_bounds)} sliders at full range, 29 of them whole percent-points")
 
 # DEFECT 1 GUARD -- the check that would have caught it.
 # `format` is a literal printf applied to the WIDGET's value, so the only honest
 # comparison is: render the widget's own shipped endpoints through the widget's own
-# shipped format string, and require the legend's string for the native value.
-# Asserting `fmt == "%.1f%%"` alone was the vacuous version of this: it proved the
-# format was chosen, never that it DISPLAYED the right number.  28 of the 32
-# bounded fields are shares, so this is most of the filter UI.
+# shipped format string, and require them to agree with the legend's percentage of
+# the same native value.  Asserting `fmt == "%d%%"` alone is the vacuous version:
+# it proves the format was chosen, never that it DISPLAYED the right NUMBER -- the
+# original defect printed "0.4%" where the legend printed "40.0%", 100x apart.
+# With whole points the two can no longer be character-identical (the legend keeps
+# one decimal), so the comparison is on VALUE: the label's digits, parsed back, must
+# be the bound's percentage rounded the same way out, and must never be the native
+# fraction re-rendered.
 _share_seen = 0
 for _f, (_lo, _hi) in sorted(filter_bounds.items()):
     if not data_layer.domain_is_share((_lo, _hi)):
         continue
     _s = _slider_for(_at_f, _f)
     _fmt = _s.proto.format
-    _alo, _ahi = _s.min, _s.max
-    assert _fmt % _alo == data_layer.format_value(_lo, True), (
-        _f, _fmt % _alo, data_layer.format_value(_lo, True))
-    assert _fmt % _ahi == data_layer.format_value(_hi, True), (
-        _f, _fmt % _ahi, data_layer.format_value(_hi, True))
+    _alo, _ahi = int(_s.min), int(_s.max)
+    for _n, _bound in ((_alo, _lo), (_ahi, _hi)):
+        _label = _fmt % _n
+        assert "." not in _label and _label.endswith("%"), (_f, _label)
+        # same number the legend prints for that bound, to within the one point the
+        # axis was widened by.
+        _legend = data_layer.format_value(_bound, True)[:-1]
+        assert abs(float(_label[:-1]) - float(_legend)) <= 1.0, (_f, _label, _legend)
+        # The defect was the label carrying the NATIVE fraction: a 0-1 axis printed
+        # "0%" and "1%" for a field whose legend said 0% and 64%.  A bound that is not
+        # itself a whole point can never be reproduced by the label, so the axis has to
+        # be the point scale wherever one exists.
+        if _bound * 100.0 != round(_bound * 100.0):
+            assert float(_label[:-1]) != _bound, (_f, _label, _bound)
+            assert abs(float(_label[:-1]) - _bound * 100.0) <= 1.0, (_f, _label, _bound)
     _share_seen += 1
 # The expected share set is derived from the raw CSV TEXT, not from
 # `domain_is_share`: asserting a remembered count (it was 28) is a typed-in number
@@ -933,9 +1002,12 @@ ok("share-vs-count axis agrees with the raw CSV text",
 # wrong axis -- legend "1", detail panel "1", slider 0-1 on %g.  Asserted on the
 # EMITTED widget, since that is what the browser read wrong.
 _psu = _slider_for(_at_f, "pct_single_unit")
-assert _psu.proto.format == "%.1f%%", _psu.proto.format
-assert _psu.proto.format % _psu.min == "0.0%", _psu.min
-assert _psu.proto.format % _psu.max == "100.0%", _psu.max
+assert _psu.proto.format == "%d%%", _psu.proto.format
+assert _psu.proto.format % int(_psu.min) == "0%", _psu.min
+assert _psu.proto.format % int(_psu.max) == "100%", _psu.max
+assert int(_psu.min) == 0 and int(_psu.max) == 100, (_psu.min, _psu.max)
+assert _psu.proto.data_type == _INT_AXIS and int(_psu.step) == 1, (
+    _psu.proto.data_type, _psu.step)
 assert data_layer.format_value(1.0000000000000002, True) == "100.0%", (
     "the artifact value must not print as a raw 1")
 # And the counts must NOT have been dragged across by the tolerance.
@@ -943,7 +1015,7 @@ for _cnt in ("canvass_attempts", "strong_no", "response_count"):
     assert not data_layer.domain_is_share(filter_bounds[_cnt]), _cnt
     assert data_layer.format_value(filter_bounds[_cnt][1], False) != "100.0%", _cnt
 ok("a float artifact in a share's maximum keeps it on the percent axis",
-   "pct_single_unit 0.0%-100.0%; 3 count fields still counts")
+   "pct_single_unit slider reads 0%-100% in whole points; 3 count fields still counts")
 
 # The tolerance's MAGNITUDE, pinned on synthetic domains rather than on this
 # extract: no field here sits between 1e-12 and, say, 1.01, so the raw-text
@@ -961,14 +1033,20 @@ assert data_layer.format_value(-1e-13, True) == "0.0%", data_layer.format_value(
 assert data_layer.format_value(-0.5, True) == "-0.5", "a real negative is not clamped away"
 ok("share tolerance is a float hair, not a band", "1e-13 in, 1.001 out, -0.0% clamped")
 # A mid-axis position has to read right too, not just the two ends the widget
-# ships by default: 40 on the percent axis is 0.4 native is "40.0%" -- the plan's
-# headline query, rendered.  Format string taken from the emitted widget rather
-# than from the loop's last binding.
+# ships by default: handle position 40 is 0.4 native is the legend's "40.0%" -- the
+# plan's headline query, rendered.  Format string taken from the emitted widget
+# rather than from the loop's last binding.
 _rend = _slider_for(_at_f, "pct_renter_occupied")
-assert _rend.proto.format % 40.0 == data_layer.format_value(0.4, True), (
-    _rend.proto.format % 40.0, data_layer.format_value(0.4, True))
-ok("share sliders display the legend's own percentage string, not 100x smaller",
-   f"{_share_seen} share fields x 2 endpoints + a midpoint")
+assert _rend.proto.format % 40 == "40%", (_rend.proto.format, _rend.proto.format % 40)
+assert abs(float((_rend.proto.format % 40)[:-1]) - 40.0) < 1e-9, _rend.proto.format
+assert _rend.proto.format % 40 != data_layer.format_value(0.4, True), (
+    "the whole-point axis is not the legend's string; if these ever match again the "
+    "step-1 requirement was dropped")
+assert data_layer.format_value(0.4, True) == "40.0%", data_layer.format_value(0.4, True)
+# And 40 is a position the handle can actually reach: step 1 from min 0.
+assert (40 - int(float(_rend.min))) % int(float(_rend.step)) == 0, (_rend.min, _rend.step)
+ok("share sliders display whole percentage points, not 100x-smaller fractions",
+   f"{_share_seen} share fields x 2 endpoints + handle 40 -> '40%'")
 
 # DEFECT 2 GUARD -- structural, over ALL 32 emitted widgets.
 # rc-slider aligns a dragged value to `min + n*step`, so if the span is not an
@@ -997,42 +1075,64 @@ assert data_layer.visible_precincts(
 assert data_layer.visible_precincts(
     rows, filter_bounds, {"canvass_attempts": (0, 612)}) is not None, (
     "a handle one step short of the bound must read as narrowed, not untouched")
-# The tolerance is load-bearing, not defensive padding.  `pct_vacant`'s upper bound
-# round trips through the percent axis to a float strictly LESS than the native
-# bound, so an exact `hi < bound[1]` compare -- the pre-fix test -- would read a
-# never-touched slider as narrowed and hide precincts on load.  Asserted on the
-# drift itself, so the case cannot quietly disappear if the axis arithmetic changes.
-_drift_field = "pct_vacant"
+# The tolerance is load-bearing, and now for a REAL field rather than a synthetic
+# round-trip.  Outward rounding makes every shipped axis COVER its bound, so the old
+# drift premise ("40/100 lands under 0.39644970414201186") is gone -- but
+# `pct_single_unit`'s bound IS the float artifact 1.0000000000000002, and its axis
+# cannot go above 100, so its untouched right handle reads exactly 1.0.  Without the
+# narrowed-side tolerance that registers as a narrowing, and a never-touched slider
+# would then hide every precinct whose pct_single_unit is blank.  Asserted on the
+# containment itself so the case cannot quietly disappear if the axis changes.
+_drift_field = "pct_single_unit"
 _dl, _dh = filter_bounds[_drift_field]
-_axis_hi = (_dh * 100.0) / 100.0
-assert _axis_hi < _dh, (
-    f"{_drift_field} no longer drifts on the axis round trip; this check proves nothing "
-    f"({repr(_dh)} == {repr(_axis_hi)})")
+assert _dh > 1.0, f"{_drift_field} lost its artifact bound; this check proves nothing ({_dh!r})"
+_axis_hi = float(ui._slider_format(_drift_field, (_dl, _dh), dictionary, rows)[2]) / 100.0
+assert _axis_hi == 1.0 and _axis_hi < _dh, (_dh, _axis_hi)
 assert _dh - _axis_hi < (_dh - _dl) * 1e-9, (_dh, _axis_hi)
 assert data_layer.visible_precincts(rows, filter_bounds, {_drift_field: (_dl, _axis_hi)}) is None, (
-    "an axis round trip inside the tolerance registered as a narrowing")
+    "an untouched whole-point axis reading under its own artifact bound registered as a narrowing")
+_blank_psu = sum(1 for r in rows if not (r.get(_drift_field) or "").strip())
+assert _blank_psu, "pct_single_unit has no blanks, so this guard cannot fail"
 ok("bound-touching and axis-round-tripped ranges both read as untouched",
-   f"{_drift_field} drifts {repr(_dh)} -> {repr(_axis_hi)} and is still inert")
+   f"{_drift_field} axis tops out at {repr(_axis_hi)} for bound {repr(_dh)} and is inert "
+   f"({_blank_psu} blank rows would have been hidden)")
 
 # PASS 2 (P1): the same tolerance has to reach MEMBERSHIP, not only the narrowed-side
-# test above.  A share's percent axis round trips to a hair INSIDE its own bound, so
-# under an exact `lo <= v <= hi` a reader who moves only the LEFT handle loses the
-# precinct sitting on the untouched right endpoint -- precinct 3041 disappears behind a
-# right handle displaying the identical 39.6%.  Enumerated from the shipped axis
-# arithmetic rather than from a remembered field name: for every share field whose
-# step-aligned round-tripped endpoints fall strictly inside its bound, the min-holder
-# and the max-holder must survive a midpoint narrowing of the OTHER handle.
+# test above.  Under the OLD float axis this was the whole point: a round trip landed
+# a hair INSIDE the bound, so a reader who moved only the LEFT handle lost the precinct
+# on the untouched right endpoint -- precinct 3041 vanished behind a handle displaying
+# the identical 39.6%.  Outward rounding means a shipped whole-point axis now COVERS
+# its bound, so `axis_hi/100 >= hi` for every share except the one whose bound is the
+# float artifact `pct_single_unit`'s 1.0000000000000002, which cannot be covered above
+# 100.  Enumerated from the shipped axis arithmetic, not from remembered field names:
+# every field whose untouched handles do NOT exactly reproduce its bound is listed, and
+# for each of those the min-holder and max-holder must survive a midpoint narrowing of
+# the OTHER handle.
 _DRIFT_SHARES = []
+_COVERED = 0
 for _f, (_lo, _hi) in sorted(filter_bounds.items()):
     if not data_layer.domain_is_share((_lo, _hi)):
         continue
     _dt, _a0, _a1, _st, _fmt, _sc = ui._slider_format(_f, (_lo, _hi), dictionary, rows)
     _n0 = float(_a0) / _sc
     _n1 = (float(_a0) + round((float(_a1) - float(_a0)) / float(_st)) * float(_st)) / _sc
-    if _n0 < _lo or _n0 > _lo or _n1 < _hi or _n1 > _hi:
-        _DRIFT_SHARES.append((_f, _n0, _n1))
-assert len(_DRIFT_SHARES) == 5, [f for f, _, _ in _DRIFT_SHARES]
-for _f, _n0, _n1 in _DRIFT_SHARES:
+    # Outward, but the axis is clamped to 0-100, so a bound that is itself a float
+    # hair beyond 1.0 cannot be covered -- `pct_single_unit`'s artifact.  Everything
+    # else must strictly contain its bound.
+    _hair = (_hi - _lo) * settings.SHARE_TOLERANCE
+    assert _n0 <= _lo + _hair and _n1 >= _hi - _hair, (
+        f"{_f}: a whole-point axis clipped its bound instead of rounding out "
+        f"({_n0!r},{_n1!r}) vs ({_lo!r},{_hi!r})")
+    if _n0 != _lo or _n1 != _hi:
+        _DRIFT_SHARES.append((_f, _n0, _n1, _n0 > _lo or _n1 < _hi))
+        continue
+    _COVERED += 1
+assert _DRIFT_SHARES, "no share axis differs from its raw bound; this check proves nothing"
+# Exactly one field can drift INWARD -- the artifact one, whose bound is above 1.0 and
+# whose axis stops at 100.  If a second ever appears, the axis arithmetic changed.
+_inside = [f for f, _, _, hit in _DRIFT_SHARES if hit]
+assert _inside == ["pct_single_unit"], _inside
+for _f, _n0, _n1, _hit in _DRIFT_SHARES:
     _lo, _hi = filter_bounds[_f]
     _populated = {
         str(r.get(settings.JOIN_CSV_KEY)).strip(): data_layer.to_float(r.get(_f))
@@ -1044,29 +1144,30 @@ for _f, _n0, _n1 in _DRIFT_SHARES:
     _maxh = {k for k, v in _populated.items() if v == _maxv}
     _minh = {k for k, v in _populated.items() if v == _minv}
     _mid = _lo + (_hi - _lo) / 2.0
-    # Left handle to the midpoint, right handle left reading the bound: max-holder lives.
+    # Left handle to the midpoint, right handle left at the axis reading: max-holder lives.
     _keep_hi = data_layer.visible_precincts(rows, filter_bounds, {_f: (_mid, _n1)})
     assert _keep_hi is not None and _maxh <= _keep_hi, (
         f"{_f}: an untouched right handle reading {_n1!r} for bound {_hi!r} hid the "
         f"max-holder {sorted(_maxh)[:3]}")
-    # Right handle to the midpoint, left handle left reading the bound: min-holder lives.
+    # Right handle to the midpoint, left handle left at the axis reading: min-holder lives.
     _keep_lo = data_layer.visible_precincts(rows, filter_bounds, {_f: (_n0, _mid)})
     assert _keep_lo is not None and _minh <= _keep_lo, (
         f"{_f}: an untouched left handle reading {_n0!r} for bound {_lo!r} hid the "
         f"min-holder {sorted(_minh)[:3]}")
     # And the tolerance is a float hair, not an open range: pulling the right handle in
-    # by 1% of the span -- six orders of magnitude more than tol -- must drop the
-    # max-holder.  Without this the membership fix could read as "ignore hi".
-    _tight = data_layer.visible_precincts(
-        rows, filter_bounds, {_f: (_mid, _hi - (_hi - _lo) * 0.01)})
+    # by one WHOLE POINT -- 100x the step-1 granularity the handle can express -- must
+    # drop the max-holder.  Without this the membership fix could read as "ignore hi".
+    _tight = data_layer.visible_precincts(rows, filter_bounds, {_f: (_mid, _hi - 0.01)})
     assert _tight is not None and not (_maxh & _tight), (
-        f"{_f}: the membership tolerance swallowed a real 1%-of-span narrowing")
-# The reported reproduction, by name, so the exact survivor count cannot regress
-# unnoticed: pct_vacant's sole max-holder is precinct 3041.
+        f"{_f}: the membership tolerance swallowed a real one-point narrowing")
+# The reported reproduction, driven through the shipped whole-point axis rather than a
+# hand-written float: narrowing pct_vacant's LEFT handle to its midpoint, leaving the
+# right handle at the axis maximum 40, keeps its sole max-holder precinct 3041.
 _pvl, _pvh = filter_bounds["pct_vacant"]
+_pt, _pa0, _pa1, _pst, _pfmt, _psc = ui._slider_format("pct_vacant", (_pvl, _pvh), dictionary, rows)
+assert (_pa0, _pa1) == (0, 40), (_pa0, _pa1)
 _pv_mask = data_layer.visible_precincts(
-    rows, filter_bounds, {"pct_vacant": (_pvl + (_pvh - _pvl) / 2.0, (_pvh * 100.0) / 100.0)})
-assert (_pvh * 100.0) / 100.0 < _pvh, "pct_vacant no longer drifts; this check proves nothing"
+    rows, filter_bounds, {"pct_vacant": (_pvl + (_pvh - _pvl) / 2.0, _pa1 / _psc)})
 assert "3041" in _pv_mask, f"pct_vacant lost its own max-holder: {len(_pv_mask)} survivors"
 assert len(_pv_mask) == len({
     r[settings.JOIN_CSV_KEY].strip() for r in rows
@@ -1074,8 +1175,9 @@ assert len(_pv_mask) == len({
     and (v := data_layer.to_float(r.get("pct_vacant"))) is not None
     and v >= _pvl + (_pvh - _pvl) / 2.0
 }), f"pct_vacant narrowing lost a precinct: {len(_pv_mask)} survivors"
-ok("endpoint holders stay visible: 5 drifting share fields keep min+max holders",
-   f"{len(_DRIFT_SHARES)} fields, 3041 among {_pv_mask and len(_pv_mask)} pct_vacant survivors")
+ok("endpoint holders stay visible: outward-rounded axes keep min+max holders, 3041 included",
+   f"{len(_DRIFT_SHARES)} axes off their raw bound ({len(_inside)} inward: {_inside}), "
+   f"{_COVERED} exact, {len(_pv_mask)} pct_vacant survivors at axis 0-40")
 
 # DEFECT 2, driven on the REAL widget rather than on the helper's numbers.
 # The structural span/step check above proves the position exists; this proves the
@@ -1329,6 +1431,40 @@ assert _close(_slider_for(_at_u, _STALE_FIELD).value[0], _stale_axis[0]), (
     _slider_for(_at_u, _STALE_FIELD).value, _stale_axis)
 ok("stale keys are judged against the axis bound, not the native one",
    f"native (0.4,1.0) dropped against axis {_stale_axis[0]:.3f}..{_stale_axis[1]:.3f}")
+
+# The third stale shape: INSIDE the range but NOT on a whole point.  A persisted
+# 20.5 for `pct_vacant` (axis 0-40, step 1) is in bounds, so the two checks above
+# cannot see it, and Streamlit accepts it silently -- then `"%d%%" % 20.5` prints
+# "20%" while the mask filters at 20.5%.  A label that lies by the fraction it
+# cannot show is exactly the class of defect this suite exists for, so an integral
+# axis must drop an off-step pair rather than inherit it.  `2024_kamala` is the
+# counter-example: its axis bound is its raw 0.639024..., so a persisted 0.639 sits
+# inside it and gets dropped as non-integral too, while a genuine whole 20-60 for
+# pct_vacant must SURVIVE untouched -- otherwise reset-on-every-render would be
+# masquerading as correctness.
+_pv_axis = _AXIS["pct_vacant"]
+assert (_pv_axis[0], _pv_axis[1]) == (0, 40), _pv_axis
+_at_off, _decks_off = render_filters(seeded={
+    settings.FILTER_SESSION_PREFIX + "pct_vacant": (20.5, 39.644970414201186),
+    settings.FILTER_SESSION_PREFIX + "pct_renter_occupied": (20, 60),
+})
+assert not _at_off.exception, [str(e.value) for e in _at_off.exception]
+assert not [w.value for w in _at_off.warning], [w.value for w in _at_off.warning]
+_pv_off = _slider_for(_at_off, "pct_vacant")
+assert _close(_pv_off.value[0], _pv_axis[0]) and _close(_pv_off.value[1], _pv_axis[1]), (
+    f"an off-whole-point persisted pair must be dropped, got {_pv_off.value}")
+_ren_off = _slider_for(_at_off, "pct_renter_occupied")
+assert _close(_ren_off.value[0], 20) and _close(_ren_off.value[1], 60), (
+    f"a whole-point persisted range must survive, got {_ren_off.value}")
+# And the surviving whole-point range really is narrowing, not silently reset:
+# it must reach the mask as 0.2-0.6 native and hide precincts.
+_off_mask = data_layer.visible_precincts(rows, filter_bounds, {"pct_renter_occupied": (0.2, 0.6)})
+assert _off_mask is not None and len(_off_mask) < len({
+    r[settings.JOIN_CSV_KEY].strip() for r in rows
+    if (r.get(settings.JOIN_CSV_KEY) or "").strip()}), _off_mask
+assert _drawn(_decks_off[-1]) < len(_FILTER_FC["features"]), _drawn(_decks_off[-1])
+ok("an off-whole-point persisted range is dropped; a whole-point one is honoured",
+   f"20.5 -> full {_pv_axis}, (20,60) kept and drawing {len(_off_mask)} survivors")
 
 # Matrix row OFFLINE: a dead precinct endpoint keeps its single st.error and emits
 # zero filter widgets -- the error path returns before the second sidebar block, so
